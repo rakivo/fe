@@ -44,9 +44,12 @@
 
 #if (defined(__GNUC__) && __GNUC__ >= 7) || defined(__clang__)
 	#define NORETURN __attribute__((noreturn))
+	#define INLINE __attribute__((always_inline)) static inline
 #elif defined(_MSC_VER)
+	#define INLINE static __forceinline
 	#define NORETURN __declspec(noreturn)
 #else
+	#define INLINE static inline
 	#define NORETURN
 #endif
 
@@ -69,6 +72,11 @@ void scratch_buffer_printf(const char *format, ...);
 char *scratch_buffer_to_string(void);
 char *scratch_buffer_copy(void);
 
+INLINE uint32_t vec_size(const void *vec);
+static inline void vec_resize(void *vec, uint32_t new_size);
+static inline void vec_pop(void *vec);
+static inline void vec_erase_ptr_at(void *vec, unsigned i);
+
 NORETURN void error_exit(const char *format, ...);
 
 #ifdef __cplusplus
@@ -79,12 +87,10 @@ NORETURN void error_exit(const char *format, ...);
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <assert.h>
-
-#define KB 1024ul
-#define MB (KB * 1024ul)
 
 #if PLATFORM_POSIX
 #include <sys/mman.h>
@@ -93,6 +99,51 @@ NORETURN void error_exit(const char *format, ...);
 #if PLATFORM_WINDOWS
 #include <windows.h>
 #define COMMIT_PAGE_SIZE 0x10000
+#endif
+
+#define KB 1024ul
+#define MB (KB * 1024ul)
+
+#define VECNEW(_type, _capacity) ((_type *)(vec_new_(sizeof(_type), _capacity) + 1))
+#define vec_add(vec_, ...) do { \
+	void *__temp = expand_((vec_), sizeof(*(vec_))); \
+	(vec_) = (decltype(vec_)) __temp;										 \
+	(vec_)[vec_size(vec_) - 1] = __VA_ARGS__; \
+} while (0)
+
+#define vec_insert_first(vec_, value_) do { \
+ void *__temp = expand_((vec_), sizeof(*(vec_))); \
+ (vec_) = __temp;                           \
+ unsigned __xsize = vec_size(vec_); \
+ for (unsigned __x = __xsize - 1; __x > 0; __x--) (vec_)[__x] = (vec_)[__x - 1]; \
+ (vec_)[0] = value_;       \
+} while (0)
+
+#define vec_insert_at(vec_, _at, value_) do { \
+ void *__temp = expand_((vec_), sizeof(*(vec_))); \
+ (vec_) = __temp;                           \
+ unsigned __xsize = vec_size(vec_); \
+ for (unsigned __x = __xsize - 1; __x > _at; __x--) (vec_)[__x] = (vec_)[__x - 1]; \
+ (vec_)[_at] = value_;       \
+} while (0)
+
+#if IS_GCC || IS_CLANG
+#define VECLAST(_vec) ({ unsigned _size = vec_size(_vec); _size ? (_vec)[_size - 1] : NULL; })
+#else
+#define VECLAST(_vec) (vec_size(_vec) ? (_vec)[vec_size(_vec) - 1] : NULL)
+#endif
+#define vectail(_vec) (_vec)[vec_size(_vec) - 1]
+
+#if NO_ARENA
+#define MALLOC(mem) malloc(mem)
+#define MALLOCS(type) malloc(sizeof(type))
+#define CALLOC(mem) calloc(16 * (((mem) + 15) / 16), 16)
+#define CALLOCS(type) calloc(1, sizeof(type))
+#else
+#define MALLOC(mem) malloc_arena(mem)
+#define MALLOCS(type) malloc_arena(sizeof(type))
+#define CALLOC(mem) calloc_arena(mem)
+#define CALLOCS(type) calloc_arena(sizeof(type))
 #endif
 
 struct ScratchBuf scratch_buffer;
@@ -108,6 +159,8 @@ typedef struct
 } Vmem;
 
 static int allocations_done;
+static Vmem arena;
+uintptr_t arena_zero;
 static Vmem char_arena;
 static size_t max = 0x10000000;
 
@@ -121,12 +174,16 @@ static void vmem_free(Vmem *vmem);
 void memory_init(size_t max_mem)
 {
 	if (max_mem) vmem_set_max_limit(max_mem);
+	vmem_init(&arena, 2048);
 	vmem_init(&char_arena, 512);
 	allocations_done = 0;
+	arena_zero = (uintptr_t) arena.ptr;
+	vmem_alloc(&arena, 16);
 }
 
 void memory_release(void)
 {
+	vmem_free(&arena);
 	vmem_free(&char_arena);
 }
 
@@ -217,6 +274,102 @@ static void vmem_free(Vmem *vmem)
 	vmem->size = 0;
 }
 
+void free_arena(void)
+{
+	vmem_free(&arena);
+}
+
+void *calloc_arena(size_t mem)
+{
+	assert(mem > 0);
+	// Round to multiple of 16
+	mem = (mem + 15U) & ~15ULL;
+	allocations_done++;
+	return vmem_alloc(&arena, mem);
+}
+
+typedef struct
+{
+	uint32_t size;
+	uint32_t capacity;
+	char data[];
+} VHeader_;
+
+static inline VHeader_* vec_new_(size_t element_size, size_t capacity)
+{
+	assert(capacity < UINT32_MAX);
+	assert(element_size < UINT32_MAX / 100);
+	VHeader_ *header = (VHeader_ *) CALLOC(element_size * capacity + sizeof(VHeader_));
+	header->capacity = (uint32_t) capacity;
+	return header;
+}
+
+static inline void vec_resize(void *vec, uint32_t new_size)
+{
+	if (!vec) return;
+	VHeader_ *header = (VHeader_ *) vec;
+	header[-1].size = new_size;
+}
+
+INLINE uint32_t vec_size(const void *vec)
+{
+	if (!vec) return 0;
+	const VHeader_ *header = (VHeader_ *) vec;
+	return header[-1].size;
+}
+
+static inline void vec_pop(void *vec)
+{
+	assert(vec);
+	assert(vec_size(vec) > 0);
+	VHeader_ *header = (VHeader_ *) vec;
+	header[-1].size--;
+}
+
+static inline void vec_erase_ptr_at(void *vec, unsigned i)
+{
+	assert(vec);
+	unsigned size = vec_size(vec);
+	assert(size > i);
+	void **vecptr = (void**)vec;
+	for (unsigned int j = i + 1; j < size; j++)
+	{
+		vecptr[j - 1] = vecptr[j];
+	}
+	VHeader_ *header = (VHeader_ *) vec;
+	header[-1].size--;
+}
+
+static inline void *expand_(void *vec, size_t element_size)
+{
+	VHeader_ *header;
+	if (!vec)
+	{
+		header = vec_new_(element_size, 8);
+	}
+	else
+	{
+		header = ((VHeader_ *)vec) - 1;
+	}
+	if (header->size == header->capacity)
+	{
+		VHeader_ *new_array = vec_new_(element_size, header->capacity << 1U);
+#if IS_GCC
+		// I've yet to figure out why GCC insists that this is trying to copy
+		// 8 bytes over a size zero array.
+		// We use volatile to deoptimize on GCC
+		volatile size_t copy_size = element_size * header->capacity + sizeof(VHeader_);
+#else
+		size_t copy_size = element_size * header->capacity + sizeof(VHeader_);
+#endif
+		memcpy(new_array, header, copy_size);
+		header = new_array;
+		new_array->capacity = header->capacity << 1U;
+	}
+	header->size++;
+	return &(header[1]);
+}
+
 void *calloc_string(size_t len)
 {
 	assert(len > 0);
@@ -226,7 +379,7 @@ void *calloc_string(size_t len)
 
 static char *str_copy(const char *start, size_t str_len)
 {
-	char *dst = calloc_string(str_len + 1);
+	char *dst = (char *) calloc_string(str_len + 1);
 	memcpy(dst, start, str_len);
 	// No need to set the end
 	return dst;

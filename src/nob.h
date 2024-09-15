@@ -104,11 +104,11 @@ Nob_File_Type nob_get_file_type(const char *path);
 #define NOB_DA_INIT_CAP 256
 
 // Append an item to a dynamic array
-#define nob_da_append(da, item)                                                          \
+#define nob_da_append(da, type, item)																		\
     do {                                                                                 \
         if ((da)->count >= (da)->capacity) {                                             \
             (da)->capacity = (da)->capacity == 0 ? NOB_DA_INIT_CAP : (da)->capacity*2;   \
-            (da)->items = NOB_REALLOC((da)->items, (da)->capacity*sizeof(*(da)->items)); \
+            (da)->items = (type *) NOB_REALLOC((da)->items, (da)->capacity*sizeof(*(da)->items)); \
             NOB_ASSERT((da)->items != NULL && "Buy more RAM lol");                       \
         }                                                                                \
                                                                                          \
@@ -118,7 +118,7 @@ Nob_File_Type nob_get_file_type(const char *path);
 #define nob_da_free(da) NOB_FREE((da).items)
 
 // Append several items to a dynamic array
-#define nob_da_append_many(da, new_items, new_items_count)                                  \
+#define nob_da_append_many(da, type, new_items, new_items_count)					\
     do {                                                                                    \
         if ((da)->count + (new_items_count) > (da)->capacity) {                               \
             if ((da)->capacity == 0) {                                                      \
@@ -127,7 +127,7 @@ Nob_File_Type nob_get_file_type(const char *path);
             while ((da)->count + (new_items_count) > (da)->capacity) {                        \
                 (da)->capacity *= 2;                                                        \
             }                                                                               \
-            (da)->items = NOB_REALLOC((da)->items, (da)->capacity*sizeof(*(da)->items)); \
+            (da)->items = (type *) NOB_REALLOC((da)->items, (da)->capacity*sizeof(*(da)->items)); \
             NOB_ASSERT((da)->items != NULL && "Buy more RAM lol");                          \
         }                                                                                   \
         memcpy((da)->items + (da)->count, (new_items), (new_items_count)*sizeof(*(da)->items)); \
@@ -150,12 +150,12 @@ bool nob_read_entire_file(const char *path, Nob_String_Builder *sb);
     do {                              \
         const char *s = (cstr);       \
         size_t n = strlen(s);         \
-        nob_da_append_many(sb, s, n); \
+        nob_da_append_many(sb, char, s, n);			\
     } while (0)
 
 // Append a single NULL character at the end of a string builder. So then you can
 // use it a NULL-terminated C string
-#define nob_sb_append_null(sb) nob_da_append_many(sb, "", 1)
+#define nob_sb_append_null(sb) nob_da_append_many(sb, char, "", 1)
 
 // Free the memory allocated by a string builder
 #define nob_sb_free(sb) NOB_FREE((sb).items)
@@ -192,8 +192,8 @@ typedef struct {
 // use it as a C string.
 void nob_cmd_render(Nob_Cmd cmd, Nob_String_Builder *render);
 
-#define nob_cmd_append(cmd, ...) \
-    nob_da_append_many(cmd, \
+#define nob_cmd_append(cmd, type, ...)						\
+	nob_da_append_many(cmd, type,												 \
                        ((const char*[]){__VA_ARGS__}), \
                        (sizeof((const char*[]){__VA_ARGS__})/sizeof(const char*)))
 
@@ -411,7 +411,7 @@ bool nob_copy_file(const char *src_path, const char *dst_path)
     int src_fd = -1;
     int dst_fd = -1;
     size_t buf_size = 32*1024;
-    char *buf = NOB_REALLOC(NULL, buf_size);
+    char *buf = (char *) NOB_REALLOC(NULL, buf_size);
     NOB_ASSERT(buf != NULL && "Buy more RAM lol!!");
     bool result = true;
 
@@ -469,9 +469,9 @@ void nob_cmd_render(Nob_Cmd cmd, Nob_String_Builder *render)
         if (!strchr(arg, ' ')) {
             nob_sb_append_cstr(render, arg);
         } else {
-            nob_da_append(render, '\'');
-            nob_sb_append_cstr(render, arg);
-            nob_da_append(render, '\'');
+					nob_da_append(render, char, '\'');
+          nob_sb_append_cstr(render, arg);
+          nob_da_append(render, char, '\'');
         }
     }
 }
@@ -535,8 +535,8 @@ Nob_Proc nob_cmd_run_async(Nob_Cmd cmd, bool echo)
 		// NOTE: This leaks a bit of memory in the child process.
 		// But do we actually care? It's a one off leak anyway...
 		Nob_Cmd cmd_null = {0};
-		nob_da_append_many(&cmd_null, cmd.items, cmd.count);
-		nob_cmd_append(&cmd_null, NULL);
+		nob_da_append_many(&cmd_null, const char *, cmd.items, cmd.count);
+		nob_cmd_append(&cmd_null, const char *, NULL);
 
 		if (execvp(cmd.items[0], (char * const*) cmd_null.items) < 0) {
 			nob_log(NOB_ERROR, "Could not exec child process: %s", strerror(errno));
@@ -663,7 +663,7 @@ bool nob_read_entire_dir(const char *parent, Nob_File_Paths *children)
     errno = 0;
     struct dirent *ent = readdir(dir);
     while (ent != NULL) {
-        nob_da_append(children, nob_temp_strdup(ent->d_name));
+			nob_da_append(children, char *, nob_temp_strdup(ent->d_name));
         ent = readdir(dir);
     }
 
@@ -709,33 +709,6 @@ defer:
     return result;
 }
 
-Nob_File_Type nob_get_file_type(const char *path)
-{
-#ifdef _WIN32
-    DWORD attr = GetFileAttributesA(path);
-    if (attr == INVALID_FILE_ATTRIBUTES) {
-        nob_log(NOB_ERROR, "Could not get file attributes of %s: %lu", path, GetLastError());
-        return -1;
-    }
-
-    if (attr & FILE_ATTRIBUTE_DIRECTORY) return NOB_FILE_DIRECTORY;
-    // TODO: detect symlinks on Windows (whatever that means on Windows anyway)
-    return NOB_FILE_REGULAR;
-#else // _WIN32
-    struct stat statbuf;
-    if (stat(path, &statbuf) < 0) {
-        nob_log(NOB_ERROR, "Could not get stat of %s: %s", path, strerror(errno));
-        return -1;
-    }
-
-    switch (statbuf.st_mode & S_IFMT) {
-        case S_IFDIR:  return NOB_FILE_DIRECTORY;
-        case S_IFREG:  return NOB_FILE_REGULAR;
-        case S_IFLNK:  return NOB_FILE_SYMLINK;
-        default:       return NOB_FILE_OTHER;
-    }
-#endif // _WIN32
-}
 
 bool nob_copy_directory_recursively(const char *src_path, const char *dst_path)
 {
