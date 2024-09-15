@@ -93,6 +93,18 @@ INLINE int pixel_format_to_amount_of_bytes(int pixel_format)
 	}
 }
 
+INLINE void *copy_img_data(const Image *img)
+{
+	const size_t data_size = img->width *
+													 img->height *
+													 pixel_format_to_amount_of_bytes(img->format); // RGB
+
+	uint8_t *data = (uint8_t *) malloc(data_size);
+	uint8_t *original_data = (uint8_t *) img->data;
+	memcpy(data, original_data, data_size);
+	return data;
+}
+
 static void set_new_scale(float new_scale)
 {
 	scale = new_scale;
@@ -109,17 +121,8 @@ static void set_new_scale(float new_scale)
 		const texture_value_t value = texture_map[i].value;
 		UnloadTexture(value.texture);
 
-		const size_t data_size = value.original_img.width *
-														 value.original_img.height *
-														 pixel_format_to_amount_of_bytes(value.original_img.format);
-
-		uint8_t *data = (uint8_t *) malloc(data_size);
-		uint8_t *original_data = (uint8_t *) value.original_img.data;
-
-		memcpy(data, original_data, data_size);
-
 		Image img = {
-			.data			= (void *) data,
+			.data			= copy_img_data(&value.original_img),
 			.format		= value.original_img.format,
 			.height		= value.original_img.height,
 			.width		= value.original_img.width,
@@ -577,17 +580,8 @@ static void draw_preview(const char *file_name, const Vector2 *tile_pos)
 	Image img = {0};
 	if (!load_preview(ext, file_path, &img)) return;
 
-	const size_t data_size = img.width *
-													 img.height *
-													 pixel_format_to_amount_of_bytes(img.format); // RGB
-
-	uint8_t *data = (uint8_t *) malloc(data_size);
-	uint8_t *original_data = (uint8_t *) img.data;
-
-	memcpy(data, original_data, data_size);
-
 	Image original_img {
-		.data			= data,
+		.data			= copy_img_data(&img),
 		.format		= img.format,
 		.height		= img.height,
 		.width		= img.width,
