@@ -97,7 +97,7 @@ INLINE void *copy_img_data(const Image *img)
 {
 	const size_t data_size = img->width *
 													 img->height *
-													 pixel_format_to_amount_of_bytes(img->format); // RGB
+													 pixel_format_to_amount_of_bytes(img->format);
 
 	uint8_t *data = (uint8_t *) malloc(data_size);
 	uint8_t *original_data = (uint8_t *) img->data;
@@ -210,9 +210,7 @@ void handle_keyboard_input(void)
 	}
 }
 
-static struct {
-	int x, y;
-} last_clicked_tile_pos = {-1, -1};
+static struct {int x, y;} last_clicked_tile_pos = {-1, -1};
 
 void handle_mouse_input(void)
 {
