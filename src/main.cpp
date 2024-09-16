@@ -23,6 +23,7 @@
 
 using namespace cv;
 
+#define streq(s1, s2) (strcmp(s1, s2) == 0)
 #define eprintf(...) fprintf(stderr, __VA_ARGS__)
 
 #define TILE_COLOR DARKGRAY
@@ -70,7 +71,8 @@ static Font font = {0};
 #define DOUBLE_CLICK_THRESHOLD 0.3f
 static Vector2 last_click_pos = {0};
 static double last_click_time = 0.0;
-static struct {int x, y;} last_clicked_tile_pos = {-1, -1};
+static struct {int x, y;} last_selected_tile_pos = {0};
+static struct {int x, y;} last_selected_tile_pos_before_entering_dir = {0};
 
 static float scroll_offset_y = 0.0;
 
@@ -211,6 +213,16 @@ File_Type get_file_type(const char *path)
 	}
 }
 
+INLINE size_t get_tiles_count(void)
+{
+	return paths.size();
+}
+
+INLINE int get_tiles_per_row(void)
+{
+	return GetScreenWidth() / (tile_width + tile_spacing);
+}
+
 static char *enter_dir(const char *dir_path)
 {
 	scratch_buffer_clear();
@@ -218,6 +230,19 @@ static char *enter_dir(const char *dir_path)
 	scratch_buffer_append_char('/');
 	scratch_buffer_append(dir_path);
 	return scratch_buffer_copy();
+}
+
+static void preserve_tile_pos(size_t tile_idx)
+{
+	if (streq(paths[tile_idx], "..")) {
+		last_selected_tile_pos.x = last_selected_tile_pos_before_entering_dir.x;
+		last_selected_tile_pos.y = last_selected_tile_pos_before_entering_dir.y;
+	} else {
+		last_selected_tile_pos_before_entering_dir.x = last_selected_tile_pos.x;
+		last_selected_tile_pos_before_entering_dir.y = last_selected_tile_pos.y;
+		last_selected_tile_pos.x = 0;
+		last_selected_tile_pos.y = 0;
+	}
 }
 
 void handle_keyboard_input(void)
@@ -246,11 +271,64 @@ void handle_keyboard_input(void)
 	} else {
 		scroll_speed = DEFAULT_SCROLL_SPEED;
 	}
-}
 
-INLINE int get_tiles_per_row(void)
-{
-	return GetScreenWidth() / (tile_width + tile_spacing);
+	if (IsKeyPressed(KEY_W)
+	&&	last_selected_tile_pos.y > 0)
+	{
+		last_selected_tile_pos.y--;
+		return;
+	}
+
+	if (IsKeyPressed(KEY_A)
+	&&	last_selected_tile_pos.x > 0)
+	{
+		last_selected_tile_pos.x--;
+		return;
+	}
+
+	const int total_tiles = get_tiles_count();
+	const int tpr = get_tiles_per_row();
+	const int total_rows = (total_tiles + tpr - 1) / tpr;
+	const int tiles_in_last_row = total_tiles % tpr == 0 ? tpr : total_tiles % tpr;
+
+	if (IsKeyPressed(KEY_S)
+	&&	last_selected_tile_pos.y < total_rows - 1)
+	{
+		if (!(last_selected_tile_pos.y == total_rows - 2
+		&& last_selected_tile_pos.x >= tiles_in_last_row))
+		{
+			last_selected_tile_pos.y++;
+		}
+		return;
+	}
+
+	if (IsKeyPressed(KEY_D)) {
+		if (last_selected_tile_pos.y == total_rows - 1) {
+			if (last_selected_tile_pos.x < tiles_in_last_row - 1) {
+				last_selected_tile_pos.x++;
+			}
+		} else if (last_selected_tile_pos.x < tpr - 1) {
+			last_selected_tile_pos.x++;
+		}
+		return;
+	}
+
+	if (IsKeyPressed(KEY_ENTER)) {
+		size_t idx = last_selected_tile_pos.x;
+		if (last_selected_tile_pos.y > 0) {
+			idx += last_selected_tile_pos.y * tpr;
+		}
+
+		char *tmp = enter_dir(paths[idx]);
+		if (get_file_type(tmp) == FILE_DIRECTORY) {
+			curr_dir = tmp;
+			paths.clear();
+			read_dir();
+		} else return;
+
+		preserve_tile_pos(idx);
+		return;
+	}
 }
 
 INLINE Vector2 get_text_pos(const Vector2 *tile_pos)
@@ -299,7 +377,6 @@ void handle_mouse_input(void)
 		const Rectangle tile_rect = get_tile_rect(&tile_pos);
 
 		if (!CheckCollisionPointRec(mouse_pos, tile_rect)) continue;
-
 		if ((curr_time - last_click_time) <= DOUBLE_CLICK_THRESHOLD
 		&& CheckCollisionPointRec(last_click_pos, tile_rect))
 		{
@@ -307,19 +384,16 @@ void handle_mouse_input(void)
 			if (get_file_type(tmp) == FILE_DIRECTORY) {
 				curr_dir = tmp;
 				paths.clear();
-				scroll_offset_y = 0.0;
 				read_dir();
+				preserve_tile_pos(i);
+				break;
 			}
-			last_click_time = 0.0;
-			last_clicked_tile_pos.x = -1;
-			last_clicked_tile_pos.y = -1;
-			break;
 		}
 
-		last_click_time = curr_time;
 		last_click_pos = mouse_pos;
-		last_clicked_tile_pos.x = tile_pos_x;
-		last_clicked_tile_pos.y = tile_pos_y;
+		last_click_time = curr_time;
+		last_selected_tile_pos.x = tile_pos_x;
+		last_selected_tile_pos.y = tile_pos_y;
 		break;
 	}
 }
@@ -641,16 +715,16 @@ void render_files(void)
 		}
 
 		Color tile_color = TILE_COLOR;
-		if (last_clicked_tile_pos.x == tile_pos_x
-		&&  last_clicked_tile_pos.y == tile_pos_y)
+		if (last_selected_tile_pos.x == tile_pos_x
+		&&  last_selected_tile_pos.y == tile_pos_y)
 		{
 			tile_color = CLICKED_TILE_COLOR;
 		}
 
 		DrawRectangleV(tile_pos, (Vector2){tile_width, tile_height}, tile_color);
 
-		if (last_clicked_tile_pos.x == tile_pos_x
-		&& last_clicked_tile_pos.y == tile_pos_y)
+		if (last_selected_tile_pos.x == tile_pos_x
+		&& last_selected_tile_pos.y == tile_pos_y)
 		{
 			const Rectangle tile_rect =	get_tile_rect(&tile_pos);
 			draw_text_boxed(font, paths[i], tile_rect, true, WHITE);
@@ -673,8 +747,8 @@ void render_files(void)
 			continue;
 		}
 
-		if (last_clicked_tile_pos.x == tile_pos_x
-		&&  last_clicked_tile_pos.y == tile_pos_y)
+		if (last_selected_tile_pos.x == tile_pos_x
+		&&  last_selected_tile_pos.y == tile_pos_y)
 		{
 			continue;
 		}
@@ -720,7 +794,7 @@ int main(const int argc, char *argv[])
 	font = LoadFontEx(FONT_PATH, font_size, NULL, 0);
 
 	if (argc > 1
-	&& get_file_type(argv[1]) == FILE_DIRECTORY)
+	&&	get_file_type(argv[1]) == FILE_DIRECTORY)
 	{
 		curr_dir = argv[1];
 	}
@@ -752,3 +826,7 @@ int main(const int argc, char *argv[])
 	CloseWindow();
 	return 0;
 }
+
+/* TODO:
+	Scroll pages with keyboard
+*/
