@@ -5,6 +5,11 @@
 #include <stdbool.h>
 #include <sys/stat.h>
 
+#include <vector>
+#include <future>
+#include <thread>
+#include <optional>
+
 #define SCRATCH_BUFFER_IMPLEMENTATION
 #include "scratch_buffer.h"
 
@@ -36,22 +41,28 @@ using namespace cv;
 #define DEFAULT_FONT_SIZE    20
 #define DEFAULT_TEXT_SPACING 2.0f
 
+#define DEFAULT_SCROLL_SPEED 50.0f
+#define SCROLL_SPEED_BOOST_FACTOR 2.5f
+#define BOOSTED_SCROLL_SPEED (DEFAULT_SCROLL_SPEED * SCROLL_SPEED_BOOST_FACTOR)
+
 static int tile_width     = DEFAULT_TILE_WIDTH;
 static int tile_height    = DEFAULT_TILE_HEIGHT;
 static int tile_spacing   = DEFAULT_TILE_SPACING;
 static int text_padding   = DEFAULT_TEXT_PADDING;
 static int font_size      = DEFAULT_FONT_SIZE;
 static float text_spacing = DEFAULT_TEXT_SPACING;
+static float scroll_speed = DEFAULT_SCROLL_SPEED;
 
 typedef enum {
-	NOB_FILE_POISONED = 0,
-	NOB_FILE_REGULAR,
-	NOB_FILE_DIRECTORY,
-	NOB_FILE_SYMLINK,
-	NOB_FILE_OTHER,
-} Nob_File_Type;
+	FILE_POISONED = 0,
+	FILE_REGULAR,
+	FILE_DIRECTORY,
+	FILE_SYMLINK,
+	FILE_OTHER,
+} File_Type;
 
-static char **paths = NULL;
+std::vector<char *> paths = {};
+
 static char *curr_dir = ".";
 
 static Font font = {0};
@@ -59,8 +70,8 @@ static Font font = {0};
 #define DOUBLE_CLICK_THRESHOLD 0.3f
 static Vector2 last_click_pos = {0};
 static double last_click_time = 0.0;
+static struct {int x, y;} last_clicked_tile_pos = {-1, -1};
 
-#define SCROLL_SPEED 50.0f
 static float scroll_offset_y = 0.0;
 
 #define SCALE_THRESHOLD 0.1f
@@ -73,14 +84,17 @@ static double last_scale_time = 0.0;
 static float scale = 1.0;
 
 typedef struct {
-	Image original_img;
-	Texture2D texture;
-} texture_value_t;
+	Image src_img;
+	Image scaled_img;
+	std::optional<Texture2D> loaded_texture;
+} img_value_t;
 
-static struct {
+typedef struct {
 	size_t key;
-	texture_value_t value;
-} *texture_map = NULL;
+	img_value_t value;
+} img_map_t;
+
+static img_map_t *img_map = NULL;
 
 static void resize_img(Image *image, int tw, int th);
 static bool load_preview(const char *ext, const char *file_path, Image *img);
@@ -107,31 +121,33 @@ INLINE void *copy_img_data(const Image *img)
 
 static void set_new_scale(float new_scale)
 {
-	scale = new_scale;
+	scale				 = new_scale;
 	tile_width   = DEFAULT_TILE_WIDTH   * scale;
 	tile_height  = DEFAULT_TILE_HEIGHT  * scale;
 	tile_spacing = DEFAULT_TILE_SPACING * scale;
 	text_padding = DEFAULT_TEXT_PADDING * scale;
 	font_size    = DEFAULT_FONT_SIZE    * scale;
 	text_spacing = DEFAULT_TEXT_SPACING * scale;
+
 	UnloadFont(font);
 	font = LoadFontEx(FONT_PATH, font_size, NULL, 0);
 
-	for (long i = 0; i < hmlen(texture_map); ++i) {
-		const texture_value_t value = texture_map[i].value;
-		UnloadTexture(value.texture);
-
+	for (long i = 0; i < hmlen(img_map); ++i) {
+		const img_value_t value = img_map[i].value;
+		if (value.loaded_texture) {
+			UnloadTexture(*value.loaded_texture);
+		}
+		UnloadImage(value.scaled_img);
 		Image img = {
-			.data			= copy_img_data(&value.original_img),
-			.format		= value.original_img.format,
-			.height		= value.original_img.height,
-			.width		= value.original_img.width,
-			.mipmaps	= value.original_img.mipmaps
+			.data			= copy_img_data(&value.src_img),
+			.format		= value.src_img.format,
+			.height		= value.src_img.height,
+			.width		= value.src_img.width,
+			.mipmaps	= value.src_img.mipmaps
 		};
-
 		resize_img(&img, tile_width - text_padding, tile_height - text_padding);
-		texture_map[i].value.texture = LoadTextureFromImage(img);
-		UnloadImage(img);
+		img_map[i].value.scaled_img = img;
+		img_map[i].value.loaded_texture = LoadTextureFromImage(img);
 	}
 }
 
@@ -149,7 +165,7 @@ static void read_dir(void)
 	while (ent != NULL) {
 		if (strcmp(ent->d_name, ".") != 0) {
 			char *file_path = str_copy(ent->d_name, strlen(ent->d_name));
-			vec_add(paths, file_path);
+			paths.emplace_back(file_path);
 		}
 		ent = readdir(dir);
 	}
@@ -163,19 +179,19 @@ static void read_dir(void)
 	closedir(dir);
 }
 
-Nob_File_Type nob_get_file_type(const char *path)
+File_Type get_file_type(const char *path)
 {
 	struct stat statbuf;
 	if (stat(path, &statbuf) < 0) {
 		eprintf("could not get stat of %s: %s", path, strerror(errno));
-		return NOB_FILE_POISONED;
+		return FILE_POISONED;
 	}
 
 	switch (statbuf.st_mode & S_IFMT) {
-		case S_IFDIR:	 return NOB_FILE_DIRECTORY;
-		case S_IFREG:	 return NOB_FILE_REGULAR;
-		case S_IFLNK:	 return NOB_FILE_SYMLINK;
-		default:			 return NOB_FILE_OTHER;
+		case S_IFDIR:	 return FILE_DIRECTORY;
+		case S_IFREG:	 return FILE_REGULAR;
+		case S_IFLNK:	 return FILE_SYMLINK;
+		default:			 return FILE_OTHER;
 	}
 }
 
@@ -208,65 +224,97 @@ void handle_keyboard_input(void)
 			last_scale_time = curr_time;
 		}
 	}
+
+	if (IsKeyDown(KEY_LEFT_SHIFT)) {
+		scroll_speed = BOOSTED_SCROLL_SPEED;
+	} else {
+		scroll_speed = DEFAULT_SCROLL_SPEED;
+	}
 }
 
-static struct {int x, y;} last_clicked_tile_pos = {-1, -1};
+INLINE int get_tiles_per_row(void)
+{
+	return GetScreenWidth() / (tile_width + tile_spacing);
+}
+
+INLINE Vector2 get_text_pos(const Vector2 *tile_pos)
+{
+	return (Vector2) {
+		tile_pos->x + text_padding,
+		tile_pos->y + tile_height - font_size - text_padding
+	};
+}
+
+INLINE Rectangle get_tile_rect(const Vector2 *tile_pos)
+{
+	return (Rectangle) {
+		.x = tile_pos->x + text_padding,
+		.width = tile_width - text_padding * 2,
+		.y = tile_pos->y + text_padding,
+		.height = tile_height - text_padding
+	};
+}
+
+INLINE float get_max_scroll_offset(size_t tiles_per_row)
+{
+	return (paths.size() / tiles_per_row) *
+							(tile_height + tile_spacing) -
+												GetScreenHeight();
+}
+
+INLINE Vector2 get_tile_pos(size_t tile_pos_x, size_t tile_pos_y)
+{
+	return (Vector2) {
+		tile_pos_x * (tile_width + tile_spacing) + tile_spacing,
+		tile_pos_y * (tile_height + tile_spacing) + tile_spacing - scroll_offset_y
+	};
+}
 
 void handle_mouse_input(void)
 {
-	scroll_offset_y -= GetMouseWheelMove() * SCROLL_SPEED;
+	scroll_offset_y -= GetMouseWheelMove() * scroll_speed;
 
-	const int tiles_per_row = GetScreenWidth() / (tile_width + tile_spacing);
-
-	const float max_scroll_offset = (vec_size(paths) / tiles_per_row) *
-																	(tile_height + tile_spacing) -
-																	GetScreenHeight();
+	const int tpr = get_tiles_per_row();
+	const float mso = get_max_scroll_offset(tpr);
 
 	if (scroll_offset_y < 0) scroll_offset_y = 0;
-	if (scroll_offset_y > max_scroll_offset) scroll_offset_y = max_scroll_offset;
+	if (scroll_offset_y > mso) scroll_offset_y = mso;
 	if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
 
 	const double curr_time = GetTime();
 	Vector2 mouse_pos = GetMousePosition();
 	mouse_pos.y += scroll_offset_y;
 
-	for (size_t i = 0; i < vec_size(paths); ++i) {
-		const int tile_pos_x = i % tiles_per_row;
-		const int tile_pos_y = i / tiles_per_row;
+	for (size_t i = 0; i < paths.size(); ++i) {
+		const int tile_pos_x = i % tpr;
+		const int tile_pos_y = i / tpr;
 
-		const Vector2 tile_pos = {
-			tile_pos_x * (tile_width + tile_spacing) + tile_spacing,
-			tile_pos_y * (tile_height + tile_spacing) + tile_spacing
-		};
+		const Vector2 tile_pos = get_tile_pos(tile_pos_x, tile_pos_y);
+		const Rectangle tile_rect = get_tile_rect(&tile_pos);
 
-		const Rectangle tile_rect = {
-			tile_pos.x, tile_pos.y,
-			tile_width, tile_height
-		};
+		if (!CheckCollisionPointRec(mouse_pos, tile_rect)) continue;
 
-		if (CheckCollisionPointRec(mouse_pos, tile_rect)) {
-			if ((curr_time - last_click_time) <= DOUBLE_CLICK_THRESHOLD
-			&& CheckCollisionPointRec(last_click_pos, tile_rect))
-			{
-				char *tmp = enter_dir(paths[i]);
-				if (nob_get_file_type(tmp) == NOB_FILE_DIRECTORY) {
-					curr_dir = tmp;
-					paths = NULL;
-					scroll_offset_y = 0.0;
-					read_dir();
-				}
-				last_click_time = 0.0;
-				last_clicked_tile_pos.x = -1;
-				last_clicked_tile_pos.y = -1;
-				break;
+		if ((curr_time - last_click_time) <= DOUBLE_CLICK_THRESHOLD
+		&& CheckCollisionPointRec(last_click_pos, tile_rect))
+		{
+			char *tmp = enter_dir(paths[i]);
+			if (get_file_type(tmp) == FILE_DIRECTORY) {
+				curr_dir = tmp;
+				paths.clear();
+				scroll_offset_y = 0.0;
+				read_dir();
 			}
-
-			last_click_time = curr_time;
-			last_click_pos = mouse_pos;
-			last_clicked_tile_pos.x = tile_pos_x;
-			last_clicked_tile_pos.y = tile_pos_y;
+			last_click_time = 0.0;
+			last_clicked_tile_pos.x = -1;
+			last_clicked_tile_pos.y = -1;
 			break;
 		}
+
+		last_click_time = curr_time;
+		last_click_pos = mouse_pos;
+		last_clicked_tile_pos.x = tile_pos_x;
+		last_clicked_tile_pos.y = tile_pos_y;
+		break;
 	}
 }
 
@@ -306,30 +354,25 @@ static void draw_text_boxed_selectable(Font font,
 																			 Color selectTint,
 																			 Color selectBackTint)
 {
-	int length = TextLength(text);  // Total length in bytes of the text, scanned by codepoints in loop
+	int length = TextLength(text);
 
-	float textOffsetY = 0;			// Offset between lines (on line break '\n')
-	float textOffsetX = 0.0f;		 // Offset X to next character to draw
+	float textOffsetY = 0;
+	float textOffsetX = 0.0f;
 
-	float scaleFactor = font_size/(float)font.baseSize;	 // Character rectangle scaling factor
+	float scaleFactor = font_size/(float)font.baseSize;
 
-	// Word/character wrapping mechanism variables
 	enum { MEASURE_STATE = 0, DRAW_STATE = 1 };
 	int state = word_wrap? MEASURE_STATE : DRAW_STATE;
 
-	int startLine = -1;		 // Index where to begin drawing (where a line begins)
-	int endLine = -1;			 // Index where to stop drawing (where a line ends)
-	int lastk = -1;			 // Holds last value of the character position
+	int startLine = -1;
+	int endLine = -1;
+	int lastk = -1;
 
-	for (int i = 0, k = 0; i < length; i++, k++)
-	{
-		// Get next codepoint from byte string and glyph index in font
+	for (int i = 0, k = 0; i < length; i++, k++) {
 		int codepointByteCount = 0;
 		int codepoint = GetCodepoint(&text[i], &codepointByteCount);
 		int index = GetGlyphIndex(font, codepoint);
 
-		// NOTE: Normally we exit the decoding sequence as soon as a bad byte is found (and return 0x3f)
-		// but we need to draw all of the bad bytes using the '?' symbol moving one byte
 		if (codepoint == 0x3f) codepointByteCount = 1;
 		i += (codepointByteCount - 1);
 
@@ -343,17 +386,8 @@ static void draw_text_boxed_selectable(Font font,
 			if (i + 1 < length) glyphWidth = glyphWidth + text_spacing;
 		}
 
-		// NOTE: When word_wrap is ON we first measure how much of the text we can draw before going outside of the rec container
-		// We store this info in startLine and endLine, then we change states, draw the text between those two variables
-		// and change states again and again recursively until the end of the text (or until we get outside of the container).
-		// When word_wrap is OFF we don't need the measure state so we go to the drawing state immediately
-		// and begin drawing on the next line before we can get outside the container.
-		if (state == MEASURE_STATE)
-		{
-			// TODO: There are multiple types of spaces in UNICODE, maybe it's a good idea to add support for more
-			// Ref: http://jkorpela.fi/chars/spaces.html
+		if (state == MEASURE_STATE) {
 			if ((codepoint == ' ') || (codepoint == '\t') || (codepoint == '\n')) endLine = i;
-
 			if ((textOffsetX + glyphWidth) > rec.width)
 			{
 				endLine = (endLine < 1)? i : endLine;
@@ -375,7 +409,6 @@ static void draw_text_boxed_selectable(Font font,
 				i = startLine;
 				glyphWidth = 0;
 
-				// Save character position when we switch states
 				int tmp = lastk;
 				lastk = k - 1;
 				k = tmp;
@@ -399,10 +432,8 @@ static void draw_text_boxed_selectable(Font font,
 					textOffsetX = 0;
 				}
 
-				// When text overflows rectangle height limit, just stop drawing
 				if ((textOffsetY + font.baseSize*scaleFactor) > rec.height) break;
 
-				// Draw selection background
 				bool isGlyphSelected = false;
 				if ((selectStart >= 0)
 				&& (k >= selectStart)
@@ -418,7 +449,6 @@ static void draw_text_boxed_selectable(Font font,
 					isGlyphSelected = true;
 				}
 
-				// Draw current character glyph
 				if ((codepoint != ' ') && (codepoint != '\t'))
 				{
 					DrawTextCodepoint(font, codepoint,
@@ -446,11 +476,11 @@ static void draw_text_boxed_selectable(Font font,
 	}
 }
 
-inline static void draw_text_boxed(Font font,
-																	 const char *text,
-																	 Rectangle rec,
-																	 bool word_wrap,
-																	 Color tint)
+INLINE void draw_text_boxed(Font font,
+														const char *text,
+														Rectangle rec,
+														bool word_wrap,
+														Color tint)
 {
 	draw_text_boxed_selectable(font, text, rec, word_wrap, tint, 0, 0, WHITE, WHITE);
 }
@@ -491,11 +521,11 @@ static uint8_t *load_first_frame(const char *file_path, Mat *frame)
 
 static void resize_img(Image *img, int tw, int th)
 {
-	int w = img->width;
-	int h = img->height;
+	const int w = img->width;
+	const int h = img->height;
 
-	float original_aspect = (float) w / h;
-	float target_aspect = (float) tw / th;
+	const float original_aspect = (float) w / h;
+	const float target_aspect = (float) tw / th;
 
 	// printf("%d %d %f %f\n", w, h, original_aspect, target_aspect);
 	// printf("img->height: %d\n", img->height);
@@ -522,7 +552,7 @@ static bool load_preview(const char *ext, const char *file_path, Image *img)
 		// clock_t end = clock();
 		// double elapsed = (double) (end - start) / CLOCKS_PER_SEC;
 
-		Mat frame;
+		Mat frame = {};
 		uint8_t *data = load_first_frame(file_path, &frame);
 
 		img->data = data;
@@ -533,7 +563,7 @@ static bool load_preview(const char *ext, const char *file_path, Image *img)
 
 		frame.release();
 		return true;
-	} else if (strcmp(ext, "png") == 0 || strcmp(ext, "jpg") == 0) {
+	} else if (strcmp(ext, "png") == 0) {
 		*img = LoadImage(file_path);
 		return true;
 	}
@@ -541,7 +571,7 @@ static bool load_preview(const char *ext, const char *file_path, Image *img)
 	return false;
 }
 
-static void draw_preview(const char *file_name, const Vector2 *tile_pos)
+static img_map_t *get_preview(const char *file_name)
 {
 	scratch_buffer_clear();
 	scratch_buffer_append(curr_dir);
@@ -554,65 +584,63 @@ static void draw_preview(const char *file_name, const Vector2 *tile_pos)
 	struct stat sb = {0};
 	if (lstat(file_path, &sb) == -1) {
 		perror("lstat");
+		printf("file_path: %s\n", file_name);
 		exit(EXIT_FAILURE);
 	}
 
 	int idx = -1;
 	const size_t ino = sb.st_ino;
-	if ((idx = hmgeti(texture_map, ino)) != -1) {
-		const Texture2D texture = texture_map[idx].value.texture;
-		float centered_x = tile_pos->x +
-			text_padding +
-			(tile_width - texture.width - 2 * text_padding)
-			/ 2;
-
-		float centered_y = tile_pos->y +
-			text_padding +
-			(tile_height - texture.height - 2 * text_padding)
-			/ 2;
-
-		DrawTexture(texture, centered_x, centered_y, WHITE);
-		return;
+	if ((idx = hmgeti(img_map, ino)) != -1) {
+		return &img_map[idx];
 	}
 
-	Image img = {0};
-	if (!load_preview(ext, file_path, &img)) return;
+	Image scaled_img = {0};
+	if (!load_preview(ext, file_path, &scaled_img)) return NULL;
 
-	Image original_img {
-		.data			= copy_img_data(&img),
-		.format		= img.format,
-		.height		= img.height,
-		.width		= img.width,
-		.mipmaps	= img.mipmaps,
+	const Image src_img {
+		.data			= copy_img_data(&scaled_img),
+		.format		= scaled_img.format,
+		.height		= scaled_img.height,
+		.width		= scaled_img.width,
+		.mipmaps	= scaled_img.mipmaps,
 	};
 
-	resize_img(&img, tile_width - text_padding, tile_height - text_padding);
-	Texture2D texture = LoadTextureFromImage(img);
-	UnloadImage(img);
+	resize_img(&scaled_img, tile_width - text_padding, tile_height - text_padding);
 
-	texture_value_t value = {
-		.texture = texture,
-		.original_img = original_img,
+	img_value_t value = {
+		.src_img = src_img,
+		.scaled_img = scaled_img,
+		.loaded_texture = std::nullopt,
 	};
 
-	hmput(texture_map, ino, value);
+	hmput(img_map, ino, value);
+	return NULL;
+}
+
+INLINE void load_img(std::promise<std::vector<img_map_t *>> promise)
+{
+	std::vector<img_map_t *> imgs = {};
+	imgs.reserve(paths.size());
+	for (size_t i = 0; i < paths.size(); ++i) {
+		imgs.emplace_back(get_preview(paths[i]));
+	}
+	promise.set_value(imgs);
 }
 
 void render_files(void)
 {
-	const int tiles_per_row = GetScreenWidth() / (tile_width + tile_spacing);
-	for (size_t i = 0; i < vec_size(paths); ++i) {
+	std::promise<std::vector<img_map_t *>> promise = {};
+	std::future<std::vector<img_map_t *>> future = promise.get_future();
+	std::thread texture_loader(load_img, std::move(promise));
+
+	int tiles_per_row = get_tiles_per_row();
+	for (size_t i = 0; i < paths.size(); ++i) {
 		const int tile_pos_x = i % tiles_per_row;
 		const int tile_pos_y = i / tiles_per_row;
 
-		const Vector2 tile_pos = {
-			tile_pos_x * (tile_width + tile_spacing) + tile_spacing,
-			tile_pos_y * (tile_height + tile_spacing) + tile_spacing - scroll_offset_y
-		};
+		const Vector2 tile_pos = get_tile_pos(tile_pos_x, tile_pos_y);
 
-		if (tile_pos.y + tile_height < 0
-		|| tile_pos.y > GetScreenHeight())
-		{
+		if (tile_pos.y + tile_height < 0 || tile_pos.y > GetScreenHeight()) {
 			continue;
 		}
 
@@ -626,25 +654,65 @@ void render_files(void)
 		DrawRectangleV(tile_pos, (Vector2){tile_width, tile_height}, tile_color);
 
 		if (last_clicked_tile_pos.x == tile_pos_x
-		&&  last_clicked_tile_pos.y == tile_pos_y)
+		&& last_clicked_tile_pos.y == tile_pos_y)
 		{
-			Rectangle tile_rect = {
-				// apply spacing from left and right
-				.x = tile_pos.x + text_padding,
-				.width = tile_width - text_padding * 2,
-				.y = tile_pos.y + text_padding,
-				.height = tile_height - text_padding
-			};
+			const Rectangle tile_rect =	get_tile_rect(&tile_pos);
 			draw_text_boxed(font, paths[i], tile_rect, true, WHITE);
 		} else {
-			draw_preview(paths[i], &tile_pos);
-			Vector2 text_pos = {
-				tile_pos.x + text_padding,
-				tile_pos.y + tile_height - font_size - text_padding
-			};
+			const Vector2 text_pos = get_text_pos(&tile_pos);
 			draw_truncated_text(paths[i], text_pos, tile_width - 2 * text_padding, WHITE);
 		}
 	}
+
+	std::vector<img_map_t*> imgs = future.get();
+	for (size_t i = 0; i < paths.size(); ++i) {
+		const int tile_pos_x = i % tiles_per_row;
+		const int tile_pos_y = i / tiles_per_row;
+
+		const Vector2 tile_pos = get_tile_pos(tile_pos_x, tile_pos_y);
+
+		if (tile_pos.y + tile_height < 0
+		|| tile_pos.y > GetScreenHeight())
+		{
+			continue;
+		}
+
+		if (last_clicked_tile_pos.x == tile_pos_x
+		&&  last_clicked_tile_pos.y == tile_pos_y)
+		{
+			continue;
+		}
+
+		img_map_t *img = imgs[i];
+		if (img == NULL) continue;
+
+		Texture2D texture = {0};
+		if (img->value.loaded_texture) {
+			texture = *img->value.loaded_texture;
+		} else {
+			texture = LoadTextureFromImage(img->value.scaled_img);
+			img->value.loaded_texture = texture;
+		}
+
+		const float centered_x = tile_pos.x			+
+														 text_padding		+
+														 (tile_width		-
+															texture.width -
+															2 * text_padding) / 2;
+
+		const float centered_y = tile_pos.y			 +
+														 text_padding		 +
+														 (tile_height		 -
+															texture.height -
+															2 * text_padding) / 2;
+
+		DrawTexture(texture, centered_x, centered_y, WHITE);
+
+		const Vector2 text_pos = get_text_pos(&tile_pos);
+		draw_truncated_text(paths[i], text_pos, tile_width - 2 * text_padding, WHITE);
+	}
+
+	texture_loader.join();
 }
 
 int main(const int argc, char *argv[])
@@ -656,7 +724,7 @@ int main(const int argc, char *argv[])
 	font = LoadFontEx(FONT_PATH, font_size, NULL, 0);
 
 	if (argc > 1
-	&& nob_get_file_type(argv[1]) == NOB_FILE_DIRECTORY)
+	&& get_file_type(argv[1]) == FILE_DIRECTORY)
 	{
 		curr_dir = argv[1];
 	}
@@ -674,13 +742,16 @@ int main(const int argc, char *argv[])
 		EndDrawing();
 	}
 
-	for (long i = 0; i < hmlen(texture_map); ++i) {
-		UnloadImage(texture_map[i].value.original_img);
-		UnloadTexture(texture_map[i].value.texture);
+	for (long i = 0; i < hmlen(img_map); ++i) {
+		UnloadImage(img_map[i].value.scaled_img);
+		UnloadImage(img_map[i].value.src_img);
+		if (img_map[i].value.loaded_texture) {
+			UnloadTexture(*img_map[i].value.loaded_texture);
+		}
 	}
 
 	memory_release();
-	hmfree(texture_map);
+	hmfree(img_map);
 	UnloadFont(font);
 	CloseWindow();
 	return 0;
