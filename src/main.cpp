@@ -37,7 +37,7 @@ using namespace cv;
 #define DEFAULT_TILE_WIDTH   120
 #define DEFAULT_TILE_HEIGHT  125
 #define DEFAULT_TILE_SPACING 21
-#define DEFAULT_TEXT_PADDING 10
+#define DEFAULT_TEXT_PADDING 6
 #define DEFAULT_FONT_SIZE    20
 #define DEFAULT_TEXT_SPACING 2.0f
 
@@ -119,35 +119,51 @@ INLINE void *copy_img_data(const Image *img)
 	return data;
 }
 
+#include <future>
+#include <vector>
+
 static void set_new_scale(float new_scale)
 {
 	scale				 = new_scale;
-	tile_width   = DEFAULT_TILE_WIDTH   * scale;
-	tile_height  = DEFAULT_TILE_HEIGHT  * scale;
+	tile_width	 = DEFAULT_TILE_WIDTH   * scale;
+	tile_height	 = DEFAULT_TILE_HEIGHT  * scale;
 	tile_spacing = DEFAULT_TILE_SPACING * scale;
 	text_padding = DEFAULT_TEXT_PADDING * scale;
-	font_size    = DEFAULT_FONT_SIZE    * scale;
+	font_size		 = DEFAULT_FONT_SIZE    * scale;
 	text_spacing = DEFAULT_TEXT_SPACING * scale;
 
 	UnloadFont(font);
 	font = LoadFontEx(FONT_PATH, font_size, NULL, 0);
 
+	std::vector<std::future<void>> resize_futures;
+	for (long i = 0; i < hmlen(img_map); ++i) {
+		resize_futures.push_back(std::async(std::launch::async, [i]() {
+			const img_value_t value = img_map[i].value;
+			if (value.loaded_texture) {
+				UnloadTexture(*value.loaded_texture);
+			}
+			UnloadImage(value.scaled_img);
+
+			Image img = {
+				.data			= copy_img_data(&value.src_img),
+				.format		= value.src_img.format,
+				.height		= value.src_img.height,
+				.width		= value.src_img.width,
+				.mipmaps	= value.src_img.mipmaps
+			};
+
+			resize_img(&img,
+								 tile_width - text_padding,
+								 tile_height - text_padding);
+
+			img_map[i].value.scaled_img = img;
+		}));
+	}
+
+	for (auto& future: resize_futures) future.get();
 	for (long i = 0; i < hmlen(img_map); ++i) {
 		const img_value_t value = img_map[i].value;
-		if (value.loaded_texture) {
-			UnloadTexture(*value.loaded_texture);
-		}
-		UnloadImage(value.scaled_img);
-		Image img = {
-			.data			= copy_img_data(&value.src_img),
-			.format		= value.src_img.format,
-			.height		= value.src_img.height,
-			.width		= value.src_img.width,
-			.mipmaps	= value.src_img.mipmaps
-		};
-		resize_img(&img, tile_width - text_padding, tile_height - text_padding);
-		img_map[i].value.scaled_img = img;
-		img_map[i].value.loaded_texture = LoadTextureFromImage(img);
+		img_map[i].value.loaded_texture = LoadTextureFromImage(value.scaled_img);
 	}
 }
 
@@ -255,13 +271,6 @@ INLINE Rectangle get_tile_rect(const Vector2 *tile_pos)
 	};
 }
 
-INLINE float get_max_scroll_offset(size_t tiles_per_row)
-{
-	return (paths.size() / tiles_per_row) *
-							(tile_height + tile_spacing) -
-												GetScreenHeight();
-}
-
 INLINE Vector2 get_tile_pos(size_t tile_pos_x, size_t tile_pos_y)
 {
 	return (Vector2) {
@@ -275,15 +284,12 @@ void handle_mouse_input(void)
 	scroll_offset_y -= GetMouseWheelMove() * scroll_speed;
 
 	const int tpr = get_tiles_per_row();
-	const float mso = get_max_scroll_offset(tpr);
 
 	if (scroll_offset_y < 0) scroll_offset_y = 0;
-	if (scroll_offset_y > mso) scroll_offset_y = mso;
 	if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
 
 	const double curr_time = GetTime();
 	Vector2 mouse_pos = GetMousePosition();
-	mouse_pos.y += scroll_offset_y;
 
 	for (size_t i = 0; i < paths.size(); ++i) {
 		const int tile_pos_x = i % tpr;
@@ -331,7 +337,7 @@ void draw_truncated_text(const char *text,
 		strncpy(truncated, text, sizeof(truncated));
 
 		while (MeasureTextEx(font, truncated, font_size, text_spacing).x +
-				 MeasureTextEx(font, "...", font_size, text_spacing).x > max_text_width
+					 MeasureTextEx(font, "...", font_size, text_spacing).x > max_text_width
 			&& len > 0)
 		{
 			truncated[--len] = '\0';
@@ -573,7 +579,6 @@ static img_map_t *get_preview(const char *file_name)
 	struct stat sb = {0};
 	if (lstat(file_path, &sb) == -1) {
 		perror("lstat");
-		printf("file_path: %s\n", file_name);
 		exit(EXIT_FAILURE);
 	}
 
@@ -594,7 +599,9 @@ static img_map_t *get_preview(const char *file_name)
 		.mipmaps	= scaled_img.mipmaps,
 	};
 
-	resize_img(&scaled_img, tile_width - text_padding, tile_height - text_padding);
+	resize_img(&scaled_img,
+						 tile_width - text_padding,
+						 tile_height - text_padding);
 
 	img_value_t value = {
 		.src_img = src_img,
