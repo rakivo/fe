@@ -388,23 +388,18 @@ static void draw_text_boxed_selectable(Font font,
 
 		if (state == MEASURE_STATE) {
 			if ((codepoint == ' ') || (codepoint == '\t') || (codepoint == '\n')) endLine = i;
-			if ((textOffsetX + glyphWidth) > rec.width)
-			{
+			if ((textOffsetX + glyphWidth) > rec.width) {
 				endLine = (endLine < 1)? i : endLine;
 				if (i == endLine) endLine -= codepointByteCount;
 				if ((startLine + codepointByteCount) == endLine) endLine = (i - codepointByteCount);
 
 				state = !state;
-			}
-			else if ((i + 1) == length)
-			{
+			} else if ((i + 1) == length) {
 				endLine = i;
 				state = !state;
 			}
 			else if (codepoint == '\n') state = !state;
-
-			if (state == DRAW_STATE)
-			{
+			if (state == DRAW_STATE) {
 				textOffsetX = 0;
 				i = startLine;
 				glyphWidth = 0;
@@ -414,20 +409,15 @@ static void draw_text_boxed_selectable(Font font,
 				k = tmp;
 			}
 		}
-		else
-		{
-			if (codepoint == '\n')
-			{
-				if (!word_wrap)
-				{
+		else {
+			if (codepoint == '\n') {
+				if (!word_wrap) {
 					textOffsetY += (font.baseSize + font.baseSize/2)*scaleFactor;
 					textOffsetX = 0;
 				}
 			}
-			else
-			{
-				if (!word_wrap && ((textOffsetX + glyphWidth) > rec.width))
-				{
+			else {
+				if (!word_wrap && ((textOffsetX + glyphWidth) > rec.width)) {
 					textOffsetY += (font.baseSize + font.baseSize/2)*scaleFactor;
 					textOffsetX = 0;
 				}
@@ -439,7 +429,7 @@ static void draw_text_boxed_selectable(Font font,
 				&& (k >= selectStart)
 				&& (k < (selectStart + selectLength)))
 				{
-					DrawRectangleRec((Rectangle){
+					DrawRectangleRec((Rectangle) {
 														 rec.x + textOffsetX - 1,
 														 rec.y + textOffsetY,
 														 glyphWidth,
@@ -458,8 +448,7 @@ static void draw_text_boxed_selectable(Font font,
 				}
 			}
 
-			if (word_wrap && (i == endLine))
-			{
+			if (word_wrap && (i == endLine)) {
 				textOffsetY += (font.baseSize + font.baseSize/2)*scaleFactor;
 				textOffsetX = 0;
 				startLine = endLine;
