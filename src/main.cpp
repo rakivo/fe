@@ -54,6 +54,8 @@ static int font_size      = DEFAULT_FONT_SIZE;
 static float text_spacing = DEFAULT_TEXT_SPACING;
 static float scroll_speed = DEFAULT_SCROLL_SPEED;
 
+#define tile_full_height (tile_height + tile_spacing)
+
 typedef enum {
 	FILE_POISONED = 0,
 	FILE_REGULAR,
@@ -120,9 +122,6 @@ INLINE void *copy_img_data(const Image *img)
 	memcpy(data, original_data, data_size);
 	return data;
 }
-
-#include <future>
-#include <vector>
 
 static void set_new_scale(float new_scale)
 {
@@ -218,6 +217,11 @@ INLINE size_t get_tiles_count(void)
 	return paths.size();
 }
 
+INLINE int get_tiles_per_col(void)
+{
+	return GetScreenHeight() / (tile_height + tile_spacing);
+}
+
 INLINE int get_tiles_per_row(void)
 {
 	return GetScreenWidth() / (tile_width + tile_spacing);
@@ -243,6 +247,14 @@ static void preserve_tile_pos(size_t tile_idx)
 		last_selected_tile_pos.x = 0;
 		last_selected_tile_pos.y = 0;
 	}
+}
+
+INLINE Vector2 get_tile_pos(size_t tile_pos_x, size_t tile_pos_y)
+{
+	return (Vector2) {
+		tile_pos_x * (tile_width + tile_spacing) + tile_spacing,
+		tile_pos_y * (tile_height + tile_spacing) + tile_spacing - scroll_offset_y
+	};
 }
 
 void handle_keyboard_input(void)
@@ -272,26 +284,35 @@ void handle_keyboard_input(void)
 		scroll_speed = DEFAULT_SCROLL_SPEED;
 	}
 
-	if (IsKeyPressed(KEY_W)
+	const int top_visible_tile = scroll_offset_y / (tile_height + tile_spacing);
+
+	if ((IsKeyPressed(KEY_W) || IsKeyPressed(KEY_UP))
 	&&	last_selected_tile_pos.y > 0)
 	{
 		last_selected_tile_pos.y--;
+
+		const int relative_tile_y = last_selected_tile_pos.y - top_visible_tile;
+		if (relative_tile_y == -1) {
+			scroll_offset_y -= (float) tile_full_height;
+		}
+
 		return;
 	}
 
-	if (IsKeyPressed(KEY_A)
+	if ((IsKeyPressed(KEY_A) || IsKeyPressed(KEY_LEFT))
 	&&	last_selected_tile_pos.x > 0)
 	{
 		last_selected_tile_pos.x--;
 		return;
 	}
 
-	const int total_tiles = get_tiles_count();
+	const int tpc = get_tiles_per_col();
 	const int tpr = get_tiles_per_row();
+	const int total_tiles = get_tiles_count();
 	const int total_rows = (total_tiles + tpr - 1) / tpr;
 	const int tiles_in_last_row = total_tiles % tpr == 0 ? tpr : total_tiles % tpr;
 
-	if (IsKeyPressed(KEY_S)
+	if ((IsKeyPressed(KEY_S) || IsKeyPressed(KEY_DOWN))
 	&&	last_selected_tile_pos.y < total_rows - 1)
 	{
 		if (!(last_selected_tile_pos.y == total_rows - 2
@@ -299,10 +320,16 @@ void handle_keyboard_input(void)
 		{
 			last_selected_tile_pos.y++;
 		}
+
+		const int relative_tile_y = last_selected_tile_pos.y - top_visible_tile;
+		if (tpc == relative_tile_y) {
+			scroll_offset_y += (float) tile_full_height;
+		}
+
 		return;
 	}
 
-	if (IsKeyPressed(KEY_D)) {
+	if (IsKeyPressed(KEY_D) || IsKeyPressed(KEY_RIGHT)) {
 		if (last_selected_tile_pos.y == total_rows - 1) {
 			if (last_selected_tile_pos.x < tiles_in_last_row - 1) {
 				last_selected_tile_pos.x++;
@@ -346,14 +373,6 @@ INLINE Rectangle get_tile_rect(const Vector2 *tile_pos)
 		.width = tile_width - text_padding * 2,
 		.y = tile_pos->y + text_padding,
 		.height = tile_height - text_padding
-	};
-}
-
-INLINE Vector2 get_tile_pos(size_t tile_pos_x, size_t tile_pos_y)
-{
-	return (Vector2) {
-		tile_pos_x * (tile_width + tile_spacing) + tile_spacing,
-		tile_pos_y * (tile_height + tile_spacing) + tile_spacing - scroll_offset_y
 	};
 }
 
@@ -703,10 +722,10 @@ void render_files(void)
 	std::future<std::vector<img_map_t *>> future = promise.get_future();
 	std::thread texture_loader(load_img, std::move(promise));
 
-	int tiles_per_row = get_tiles_per_row();
+	const int tpr = get_tiles_per_row();
 	for (size_t i = 0; i < paths.size(); ++i) {
-		const int tile_pos_x = i % tiles_per_row;
-		const int tile_pos_y = i / tiles_per_row;
+		const int tile_pos_x = i % tpr;
+		const int tile_pos_y = i / tpr;
 
 		const Vector2 tile_pos = get_tile_pos(tile_pos_x, tile_pos_y);
 
@@ -736,8 +755,8 @@ void render_files(void)
 
 	std::vector<img_map_t*> imgs = future.get();
 	for (size_t i = 0; i < paths.size(); ++i) {
-		const int tile_pos_x = i % tiles_per_row;
-		const int tile_pos_y = i / tiles_per_row;
+		const int tile_pos_x = i % tpr;
+		const int tile_pos_y = i / tpr;
 
 		const Vector2 tile_pos = get_tile_pos(tile_pos_x, tile_pos_y);
 
