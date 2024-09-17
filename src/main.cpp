@@ -16,6 +16,9 @@
 #define STB_DS_IMPLEMENTATION
 #include "stb_ds.h"
 
+// only for nob_cmd_run_async
+#include "nob.h" 
+
 #include <raylib.h>
 
 #include <opencv2/opencv.hpp>
@@ -257,6 +260,42 @@ INLINE Vector2 get_tile_pos(size_t tile_pos_x, size_t tile_pos_y)
 	};
 }
 
+static char *get_extension(char *src)
+{
+	for (int i = strlen(src) - 1; i >= 0; i--) {
+		if (src[i] == '.') {
+			char *ret = src + i + 1;
+			if (src[i + 1] == '/') ret++;
+			return ret;
+		}
+	}
+	return NULL;
+}
+
+std::vector<Nob_Proc> procs = {};
+
+void handle_enter(char *file_path)
+{
+	char *ext = get_extension(file_path);
+	if (streq(ext, "mp4")
+	||	streq(ext, "mov")
+	||	streq(ext, "mkv"))
+ 	{
+		Nob_Cmd cmd = {0};
+		nob_cmd_append(&cmd, "mpv", file_path);
+		const Nob_Proc proc = nob_cmd_run_async(cmd, true);
+		procs.emplace_back(proc);
+	} else if (streq(ext, "png")
+			   ||	 streq(ext, "jpg")
+			   ||	 streq(ext, "jpeg")) 
+	{
+		Nob_Cmd cmd = {0};
+		nob_cmd_append(&cmd, "mpv", "--loop", file_path);
+		const Nob_Proc proc = nob_cmd_run_async(cmd, true);
+		procs.emplace_back(proc);
+	}
+}
+
 void handle_keyboard_input(void)
 {
 	const double curr_time = GetTime();
@@ -347,13 +386,21 @@ void handle_keyboard_input(void)
 		}
 
 		char *tmp = enter_dir(paths[idx]);
-		if (get_file_type(tmp) == FILE_DIRECTORY) {
+		switch (get_file_type(tmp)) {
+		case FILE_DIRECTORY: {
 			curr_dir = tmp;
 			paths.clear();
 			read_dir();
-		} else return;
+			preserve_tile_pos(idx);
+		} break;
 
-		preserve_tile_pos(idx);
+		case FILE_REGULAR: {
+			handle_enter(tmp);
+		} break;
+
+		default: break;
+		}
+
 		return;
 	}
 }
@@ -400,12 +447,19 @@ void handle_mouse_input(void)
 		&& CheckCollisionPointRec(last_click_pos, tile_rect))
 		{
 			char *tmp = enter_dir(paths[i]);
-			if (get_file_type(tmp) == FILE_DIRECTORY) {
+			switch (get_file_type(tmp)) {
+			case FILE_DIRECTORY: {
 				curr_dir = tmp;
 				paths.clear();
 				read_dir();
 				preserve_tile_pos(i);
-				break;
+			} break;
+
+			case FILE_REGULAR: {
+				handle_enter(tmp);
+			} break;
+
+			default: break;
 			}
 		}
 
@@ -573,18 +627,6 @@ INLINE void draw_text_boxed(Font font,
 	draw_text_boxed_selectable(font, text, rec, word_wrap, tint, 0, 0, WHITE, WHITE);
 }
 
-static char *get_extension(char *src)
-{
-	for (int i = strlen(src) - 1; i >= 0; i--) {
-		if (src[i] == '.') {
-			char *ret = src + i + 1;
-			if (src[i + 1] == '/') ret++;
-			return ret;
-		}
-	}
-	return NULL;
-}
-
 static uint8_t *load_first_frame(const char *file_path, Mat *frame)
 {
 	VideoCapture cap(file_path);
@@ -729,7 +771,9 @@ void render_files(void)
 
 		const Vector2 tile_pos = get_tile_pos(tile_pos_x, tile_pos_y);
 
-		if (tile_pos.y + tile_height < 0 || tile_pos.y > GetScreenHeight()) {
+		if (tile_pos.y + tile_height < 0
+		|| tile_pos.y > GetScreenHeight())
+		{
 			continue;
 		}
 
@@ -838,6 +882,10 @@ int main(const int argc, char *argv[])
 			UnloadTexture(*img_map[i].value.loaded_texture);
 		}
 	}
+	
+	for (const auto& proc: procs) {
+		nob_proc_wait(proc, true);
+	}
 
 	memory_release();
 	hmfree(img_map);
@@ -847,5 +895,6 @@ int main(const int argc, char *argv[])
 }
 
 /* TODO:
-	Scroll pages with keyboard
+	1. Parallelise loading up textures into RAM
+	2. Implement search
 */

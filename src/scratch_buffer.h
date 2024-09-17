@@ -43,13 +43,13 @@
 #define MAX_STRING_BUFFER 0x10000
 
 #if (defined(__GNUC__) && __GNUC__ >= 7) || defined(__clang__)
-	#define INLINE __attribute__((always_inline)) static inline
+	#define INLINE __attribute__((always_inline)) inline
 	#define NORETURN __attribute__((noreturn))
 #elif defined(_MSC_VER)
-	#define INLINE static __forceinline
+	#define INLINE __forceinline
 	#define NORETURN __declspec(noreturn)
 #else
-	#define INLINE static inline
+	#define INLINE inline
 	#define NORETURN
 #endif
 
@@ -121,14 +121,14 @@ static void vmem_free(Vmem *vmem);
 
 //////////////////// ARENA FUNCTIONS ////////////////////
 
-void memory_init(size_t max_mem)
+INLINE void memory_init(size_t max_mem)
 {
 	if (max_mem) vmem_set_max_limit(max_mem);
 	vmem_init(&char_arena, 512);
 	allocations_done = 0;
 }
 
-void memory_release(void)
+INLINE void memory_release(void)
 {
 	vmem_free(&char_arena);
 }
@@ -191,18 +191,18 @@ static inline void* mmap_allocate(Vmem *vmem, size_t to_allocate)
 	return ptr;
 }
 
-static void vmem_set_max_limit(size_t size_in_mb)
+INLINE static void vmem_set_max_limit(size_t size_in_mb)
 {
 	max = size_in_mb;
 }
 
-static void vmem_init(Vmem *vmem, size_t size_in_mb)
+INLINE static void vmem_init(Vmem *vmem, size_t size_in_mb)
 {
 	if (size_in_mb > max) size_in_mb = max;
 	mmap_init(vmem, 1024 * 1024 * size_in_mb);
 }
 
-static void *vmem_alloc(Vmem *vmem, size_t alloc)
+INLINE static void *vmem_alloc(Vmem *vmem, size_t alloc)
 {
 	return mmap_allocate(vmem, alloc);
 }
@@ -220,14 +220,14 @@ static void vmem_free(Vmem *vmem)
 	vmem->size = 0;
 }
 
-void *calloc_string(size_t len)
+INLINE void *calloc_string(size_t len)
 {
 	assert(len > 0);
 	allocations_done++;
 	return vmem_alloc(&char_arena, len);
 }
 
-static char *str_copy(const char *start, size_t str_len)
+INLINE static char *str_copy(const char *start, size_t str_len)
 {
 	char *dst = (char *) calloc_string(str_len + 1);
 	memcpy(dst, start, str_len);
@@ -237,32 +237,31 @@ static char *str_copy(const char *start, size_t str_len)
 
 //////////////////// SCRATCH BUFFER FUNCTIONS ////////////////////
 
-void scratch_buffer_clear(void)
+INLINE void scratch_buffer_clear(void)
 {
 	scratch_buffer.len = 0;
 }
 
-void scratch_buffer_append_len(const char *string, size_t len)
+INLINE void scratch_buffer_append_len(const char *string, size_t len)
 {
-	if (len + scratch_buffer.len > MAX_STRING_BUFFER - 1)
-	{
+	if (len + scratch_buffer.len > MAX_STRING_BUFFER - 1) {
 		error_exit("Scratch buffer size (%d chars) exceeded", MAX_STRING_BUFFER - 1);
 	}
 	memcpy(scratch_buffer.str + scratch_buffer.len, string, len);
 	scratch_buffer.len += (uint32_t) len;
 }
 
-void scratch_buffer_append(const char *string)
+INLINE void scratch_buffer_append(const char *string)
 {
 	scratch_buffer_append_len(string, strlen(string));
 }
 
-void scratch_buffer_append_signed_int(int64_t i)
+INLINE void scratch_buffer_append_signed_int(int64_t i)
 {
 	scratch_buffer_printf("%lld", (long long)i);
 }
 
-void scratch_buffer_append_double(double d)
+INLINE void scratch_buffer_append_double(double d)
 {
 	scratch_buffer_printf("%f", d);
 
@@ -277,7 +276,7 @@ void scratch_buffer_append_double(double d)
 	}
 }
 
-void scratch_buffer_append_unsigned_int(uint64_t i)
+INLINE void scratch_buffer_append_unsigned_int(uint64_t i)
 {
 	scratch_buffer_printf("%llu", (unsigned long long)i);
 }
@@ -315,7 +314,7 @@ void scratch_buffer_append_in_quote(const char *string)
 	}
 }
 
-void scratch_buffer_append_char(char c)
+INLINE void scratch_buffer_append_char(char c)
 {
 	if (scratch_buffer.len + 1 > MAX_STRING_BUFFER - 1)
 	{
@@ -325,21 +324,20 @@ void scratch_buffer_append_char(char c)
 	scratch_buffer.str[scratch_buffer.len++] = c;
 }
 
-void scratch_buffer_append_char_repeat(char c, size_t count)
+INLINE void scratch_buffer_append_char_repeat(char c, size_t count)
 {
-	for (size_t i = 0; i < count; i++)
-	{
+	for (size_t i = 0; i < count; i++) {
 		scratch_buffer_append_char(c);
 	}
 }
 
-char *scratch_buffer_to_string(void)
+INLINE char *scratch_buffer_to_string(void)
 {
 	scratch_buffer.str[scratch_buffer.len] = '\0';
 	return scratch_buffer.str;
 }
 
-char *scratch_buffer_copy(void)
+INLINE char *scratch_buffer_copy(void)
 {
 	return str_copy(scratch_buffer.str, scratch_buffer.len);
 }
