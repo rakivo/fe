@@ -31,7 +31,8 @@ using namespace cv;
 
 #define TILE_COLOR DARKGRAY
 #define BACKGROUND_COLOR ((Color) {24, 24, 24, 255})
-#define CLICKED_TILE_COLOR ((Color) { 40, 40, 40, 255 })
+#define CLICKED_TILE_COLOR ((Color) {40, 40, 40, 255})
+#define SEARCH_WINDOW_BACKGROUND_COLOR ((Color) {65, 65, 65, 215})
 
 #define MAX_PATH_SIZE (256 + 1)
 
@@ -44,6 +45,9 @@ using namespace cv;
 #define DEFAULT_TEXT_PADDING 6
 #define DEFAULT_FONT_SIZE    20
 #define DEFAULT_TEXT_SPACING 2.0f
+
+#define SEARCH_TEXT_HEIGHT 25
+#define SEARCH_TEXT_SPACING 3.0f
 
 #define DEFAULT_SCROLL_SPEED 50.0f
 #define SCROLL_SPEED_BOOST_FACTOR 2.5f
@@ -58,6 +62,13 @@ static float text_spacing = DEFAULT_TEXT_SPACING;
 static float scroll_speed = DEFAULT_SCROLL_SPEED;
 
 #define tile_full_height (tile_height + tile_spacing)
+
+static bool search_mode = false;
+static char search_string[MAX_PATH_SIZE] = {0};
+static size_t search_string_size = 0;
+
+#define key_is_printable(key) (key >= 39 && key <= 96)
+#define key_is_alpha(key) (key >= KEY_A && key <= KEY_Z)
 
 typedef enum {
 	FILE_POISONED = 0,
@@ -76,8 +87,12 @@ static Font font = {0};
 #define DOUBLE_CLICK_THRESHOLD 0.3f
 static Vector2 last_click_pos = {0};
 static double last_click_time = 0.0;
-static struct {int x, y;} last_selected_tile_pos = {0};
-static struct {int x, y;} last_selected_tile_pos_before_entering_dir = {0};
+
+typedef struct {int x, y;} Vector2i;
+static Vector2i last_selected_tile_pos = {0};
+static Vector2i last_selected_tile_pos_before_entering_dir = {0};
+
+static std::vector<Nob_Proc> procs = {};
 
 static float scroll_offset_y = 0.0;
 
@@ -260,7 +275,19 @@ INLINE Vector2 get_tile_pos(size_t tile_pos_x, size_t tile_pos_y)
 	};
 }
 
-static char *get_extension(char *src)
+// trim off all the directories, e.g.
+// ./foo/bar/baz.c -> baz.c
+INLINE static const char *get_file_path(char *src)
+{
+	for (int i = strlen(src) - 1; i >= 0; i--) {
+		if (src[i] == '/') {
+			return src + i + 1;
+		}
+	}
+	return src;
+}
+
+INLINE static char *get_extension(char *src)
 {
 	for (int i = strlen(src) - 1; i >= 0; i--) {
 		if (src[i] == '.') {
@@ -271,8 +298,6 @@ static char *get_extension(char *src)
 	}
 	return NULL;
 }
-
-std::vector<Nob_Proc> procs = {};
 
 void handle_enter(char *file_path)
 {
@@ -298,7 +323,57 @@ void handle_enter(char *file_path)
 
 void handle_keyboard_input(void)
 {
+	const int tpr = get_tiles_per_row();
+
+	if (search_mode) {
+		const int w = GetScreenWidth();
+		const int h = GetScreenHeight();
+		const int rh = SEARCH_TEXT_HEIGHT + SEARCH_TEXT_SPACING * 2;
+
+		DrawRectangle(0, h - rh, w, rh, SEARCH_WINDOW_BACKGROUND_COLOR);
+
+		if (search_string_size > 0) {
+			DrawTextEx(font, 
+								 search_string,
+				 				 (Vector2) {
+									 SEARCH_TEXT_SPACING,
+									 h - SEARCH_TEXT_HEIGHT,
+								 }, 
+								 font_size, 
+								 text_spacing, 
+								 RAYWHITE);
+		}
+
+		int key = GetKeyPressed();
+		if (key == KEY_ENTER) {
+			search_mode = false;
+			if (search_string_size < 1) return;
+
+			for (size_t i = 0; i < paths.size(); ++i) {
+				if (strstr(get_file_path(paths[i]), search_string) != NULL) {
+					last_selected_tile_pos.x = i % tpr;
+					last_selected_tile_pos.y = i / tpr;
+					break;
+				}
+			}
+
+			memset(search_string, 0, search_string_size);
+			search_string_size = 0;
+		} else if (key == KEY_SPACE || key_is_printable(key)) {
+			if (search_string_size == MAX_PATH_SIZE) return;
+			if (key_is_alpha(key)) {
+				key = tolower(key);
+			}
+			search_string[search_string_size++] = key;
+		} else if (key == KEY_BACKSPACE) {
+			search_string[--search_string_size] = '\0';
+		}
+
+		return;
+	}
+
 	const double curr_time = GetTime();
+
 	if ((curr_time - last_scale_time) < SCALE_THRESHOLD) return;
 
 	if (IsKeyDown(KEY_LEFT_CONTROL)) {
@@ -323,63 +398,19 @@ void handle_keyboard_input(void)
 		scroll_speed = DEFAULT_SCROLL_SPEED;
 	}
 
-	const int top_visible_tile = scroll_offset_y / (tile_height + tile_spacing);
-
-	if ((IsKeyPressed(KEY_W) || IsKeyPressed(KEY_UP))
-	&&	last_selected_tile_pos.y > 0)
-	{
-		last_selected_tile_pos.y--;
-
-		const int relative_tile_y = last_selected_tile_pos.y - top_visible_tile;
-		if (relative_tile_y == -1) {
-			scroll_offset_y -= (float) tile_full_height;
-		}
-
-		return;
-	}
-
-	if ((IsKeyPressed(KEY_A) || IsKeyPressed(KEY_LEFT))
-	&&	last_selected_tile_pos.x > 0)
-	{
-		last_selected_tile_pos.x--;
-		return;
-	}
-
 	const int tpc = get_tiles_per_col();
-	const int tpr = get_tiles_per_row();
 	const int total_tiles = get_tiles_count();
 	const int total_rows = (total_tiles + tpr - 1) / tpr;
+	const int top_visible_tile = scroll_offset_y / (tile_height + tile_spacing);
 	const int tiles_in_last_row = total_tiles % tpr == 0 ? tpr : total_tiles % tpr;
 
-	if ((IsKeyPressed(KEY_S) || IsKeyPressed(KEY_DOWN))
-	&&	last_selected_tile_pos.y < total_rows - 1)
-	{
-		if (!(last_selected_tile_pos.y == total_rows - 2
-		&& last_selected_tile_pos.x >= tiles_in_last_row))
-		{
-			last_selected_tile_pos.y++;
-		}
-
-		const int relative_tile_y = last_selected_tile_pos.y - top_visible_tile;
-		if (tpc == relative_tile_y) {
-			scroll_offset_y += (float) tile_full_height;
-		}
-
+	switch (GetKeyPressed()) {
+	case KEY_SLASH: {
+		search_mode = true;
 		return;
-	}
+	} break;
 
-	if (IsKeyPressed(KEY_D) || IsKeyPressed(KEY_RIGHT)) {
-		if (last_selected_tile_pos.y == total_rows - 1) {
-			if (last_selected_tile_pos.x < tiles_in_last_row - 1) {
-				last_selected_tile_pos.x++;
-			}
-		} else if (last_selected_tile_pos.x < tpr - 1) {
-			last_selected_tile_pos.x++;
-		}
-		return;
-	}
-
-	if (IsKeyPressed(KEY_ENTER)) {
+	case KEY_ENTER: {
 		size_t idx = last_selected_tile_pos.x;
 		if (last_selected_tile_pos.y > 0) {
 			idx += last_selected_tile_pos.y * tpr;
@@ -400,8 +431,41 @@ void handle_keyboard_input(void)
 
 		default: break;
 		}
+	} break;
 
-		return;
+	case KEY_W: case KEY_UP: if (last_selected_tile_pos.y > 0) {
+		last_selected_tile_pos.y--;
+		const int relative_tile_y = last_selected_tile_pos.y - top_visible_tile;
+		if (relative_tile_y == -1) {
+			scroll_offset_y -= (float) tile_full_height;
+		}
+	} break;
+
+	case KEY_A: case KEY_LEFT: if (last_selected_tile_pos.x > 0) {
+		last_selected_tile_pos.x--;
+	} break;
+
+	case KEY_S: case KEY_DOWN: 
+	if (last_selected_tile_pos.y < total_rows - 1) {
+		if (!(last_selected_tile_pos.y == total_rows - 2
+		&& last_selected_tile_pos.x >= tiles_in_last_row))
+		{
+			last_selected_tile_pos.y++;
+		}
+
+		const int relative_tile_y = last_selected_tile_pos.y - top_visible_tile;
+		if (tpc == relative_tile_y) {
+			scroll_offset_y += (float) tile_full_height;
+		}
+	} break;
+
+	case KEY_D: case KEY_RIGHT: if (last_selected_tile_pos.y == total_rows - 1) {
+		if (last_selected_tile_pos.x < tiles_in_last_row - 1) {
+			last_selected_tile_pos.x++;
+		}
+	} else if (last_selected_tile_pos.x < tpr - 1) {
+		last_selected_tile_pos.x++;
+	} break;
 	}
 }
 
@@ -752,8 +816,8 @@ INLINE void load_img(std::promise<std::vector<img_map_t *>> promise)
 {
 	std::vector<img_map_t *> imgs = {};
 	imgs.reserve(paths.size());
-	for (size_t i = 0; i < paths.size(); ++i) {
-		imgs.emplace_back(get_preview(paths[i]));
+	for (const auto &path: paths) {
+		imgs.emplace_back(get_preview(path));
 	}
 	promise.set_value(imgs);
 }
@@ -869,9 +933,9 @@ int main(const int argc, char *argv[])
 	while (!WindowShouldClose()) {
 		BeginDrawing();
 			ClearBackground(BACKGROUND_COLOR);
+			render_files();
 			handle_keyboard_input();
 			handle_mouse_input();
-			render_files();
 		EndDrawing();
 	}
 
@@ -897,4 +961,6 @@ int main(const int argc, char *argv[])
 /* TODO:
 	1. Parallelise loading up textures into RAM
 	2. Implement search
+	3. Implement auto-completion in the search mode
+	4. If while search cursor got off the user scope, scroll till you see it.
 */
