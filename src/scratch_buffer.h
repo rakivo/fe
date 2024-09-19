@@ -82,6 +82,7 @@ NORETURN void error_exit(const char *format, ...);
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <assert.h>
