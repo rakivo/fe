@@ -89,6 +89,7 @@ static Vector2 last_click_pos = {0};
 static double last_click_time = 0.0;
 
 typedef struct {int x, y;} Vector2i;
+static float last_scroll_offset_y = 0.0;
 static Vector2i last_selected_tile_pos = {0};
 static Vector2i last_selected_tile_pos_before_entering_dir = {0};
 
@@ -154,9 +155,10 @@ static void set_new_scale(float new_scale)
 	UnloadFont(font);
 	font = LoadFontEx(FONT_PATH, font_size, NULL, 0);
 
+#if 0
 	std::vector<std::future<void>> resize_futures;
 	for (long i = 0; i < hmlen(img_map); ++i) {
-		resize_futures.push_back(std::async(std::launch::async, [i]() {
+			resize_futures.push_back(std::async(std::launch::async, [i]() {
 			const img_value_t value = img_map[i].value;
 			if (value.loaded_texture) {
 				UnloadTexture(*value.loaded_texture);
@@ -184,6 +186,7 @@ static void set_new_scale(float new_scale)
 		const img_value_t value = img_map[i].value;
 		img_map[i].value.loaded_texture = LoadTextureFromImage(value.scaled_img);
 	}
+#endif
 }
 
 static void read_dir(void)
@@ -257,13 +260,15 @@ static char *enter_dir(const char *dir_path)
 static void preserve_tile_pos(size_t tile_idx)
 {
 	if (streq(paths[tile_idx], "..")) {
+		scroll_offset_y = last_scroll_offset_y;
 		last_selected_tile_pos.x = last_selected_tile_pos_before_entering_dir.x;
 		last_selected_tile_pos.y = last_selected_tile_pos_before_entering_dir.y;
 	} else {
 		last_selected_tile_pos_before_entering_dir.x = last_selected_tile_pos.x;
 		last_selected_tile_pos_before_entering_dir.y = last_selected_tile_pos.y;
-		last_selected_tile_pos.x = 0;
-		last_selected_tile_pos.y = 0;
+		memset(&last_selected_tile_pos, 0, sizeof(last_selected_tile_pos));
+		last_scroll_offset_y = scroll_offset_y;
+		scroll_offset_y = 0.0;
 	}
 }
 
@@ -277,7 +282,7 @@ INLINE Vector2 get_tile_pos(size_t tile_pos_x, size_t tile_pos_y)
 
 // trim off all the directories, e.g.
 // ./foo/bar/baz.c -> baz.c
-INLINE static const char *get_file_path(char *src)
+INLINE static char *get_file_path(char *src)
 {
 	for (int i = strlen(src) - 1; i >= 0; i--) {
 		if (src[i] == '/') {
@@ -350,7 +355,12 @@ void handle_keyboard_input(void)
 			if (search_string_size < 1) return;
 
 			for (size_t i = 0; i < paths.size(); ++i) {
-				if (strstr(get_file_path(paths[i]), search_string) != NULL) {
+				scratch_buffer_clear();
+				scratch_buffer_append(paths[i]);
+
+				for (char *p = scratch_buffer.str; p != NULL && *p != '\0'; *p = tolower(*p), p++);
+
+				if (strstr(scratch_buffer.str, search_string) != NULL) {
 					last_selected_tile_pos.x = i % tpr;
 					last_selected_tile_pos.y = i / tpr;
 
@@ -822,22 +832,8 @@ static img_map_t *get_preview(const char *file_name)
 	return NULL;
 }
 
-INLINE void load_img(std::promise<std::vector<img_map_t *>> promise)
-{
-	std::vector<img_map_t *> imgs = {};
-	imgs.reserve(paths.size());
-	for (const auto &path: paths) {
-		imgs.emplace_back(get_preview(path));
-	}
-	promise.set_value(imgs);
-}
-
 void render_files(void)
 {
-	std::promise<std::vector<img_map_t *>> promise = {};
-	std::future<std::vector<img_map_t *>> future = promise.get_future();
-	std::thread texture_loader(load_img, std::move(promise));
-
 	const int tpr = get_tiles_per_row();
 	for (size_t i = 0; i < paths.size(); ++i) {
 		const int tile_pos_x = i % tpr;
@@ -870,56 +866,6 @@ void render_files(void)
 			draw_truncated_text(paths[i], text_pos, tile_width - 2 * text_padding, WHITE);
 		}
 	}
-
-	std::vector<img_map_t*> imgs = future.get();
-	for (size_t i = 0; i < paths.size(); ++i) {
-		const int tile_pos_x = i % tpr;
-		const int tile_pos_y = i / tpr;
-
-		const Vector2 tile_pos = get_tile_pos(tile_pos_x, tile_pos_y);
-
-		if (tile_pos.y + tile_height < 0
-		|| tile_pos.y > GetScreenHeight())
-		{
-			continue;
-		}
-
-		if (last_selected_tile_pos.x == tile_pos_x
-		&&  last_selected_tile_pos.y == tile_pos_y)
-		{
-			continue;
-		}
-
-		img_map_t *img = imgs[i];
-		if (img == NULL) continue;
-
-		Texture2D texture = {0};
-		if (img->value.loaded_texture) {
-			texture = *img->value.loaded_texture;
-		} else {
-			texture = LoadTextureFromImage(img->value.scaled_img);
-			img->value.loaded_texture = texture;
-		}
-
-		const float centered_x = tile_pos.x			+
-														 text_padding		+
-														 (tile_width		-
-															texture.width -
-															2 * text_padding) / 2;
-
-		const float centered_y = tile_pos.y			 +
-														 text_padding		 +
-														 (tile_height		 -
-															texture.height -
-															2 * text_padding) / 2;
-
-		DrawTexture(texture, centered_x, centered_y, WHITE);
-
-		const Vector2 text_pos = get_text_pos(&tile_pos);
-		draw_truncated_text(paths[i], text_pos, tile_width - 2 * text_padding, WHITE);
-	}
-
-	texture_loader.join();
 }
 
 int main(const int argc, char *argv[])
@@ -972,5 +918,4 @@ int main(const int argc, char *argv[])
 	1. Parallelise loading up textures into RAM
 	2. Implement search
 	3. Implement auto-completion in the search mode
-	4. If while search cursor got off the user scope, scroll till you see it.
 */
