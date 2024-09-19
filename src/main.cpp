@@ -17,7 +17,7 @@
 #include "stb_ds.h"
 
 // only for nob_cmd_run_async
-#include "nob.h" 
+#include "nob.h"
 
 #include <raylib.h>
 
@@ -305,14 +305,14 @@ void handle_enter(char *file_path)
 	if (streq(ext, "mp4")
 	||	streq(ext, "mov")
 	||	streq(ext, "mkv"))
- 	{
+	{
 		Nob_Cmd cmd = {0};
 		nob_cmd_append(&cmd, "mpv", file_path);
 		const Nob_Proc proc = nob_cmd_run_async(cmd, true);
 		procs.emplace_back(proc);
 	} else if (streq(ext, "png")
-			   ||	 streq(ext, "jpg")
-			   ||	 streq(ext, "jpeg")) 
+				 ||	 streq(ext, "jpg")
+				 ||	 streq(ext, "jpeg"))
 	{
 		Nob_Cmd cmd = {0};
 		nob_cmd_append(&cmd, "mpv", "--loop", file_path);
@@ -333,14 +333,14 @@ void handle_keyboard_input(void)
 		DrawRectangle(0, h - rh, w, rh, SEARCH_WINDOW_BACKGROUND_COLOR);
 
 		if (search_string_size > 0) {
-			DrawTextEx(font, 
+			DrawTextEx(font,
 								 search_string,
-				 				 (Vector2) {
+								 (Vector2) {
 									 SEARCH_TEXT_SPACING,
 									 h - SEARCH_TEXT_HEIGHT,
-								 }, 
-								 font_size, 
-								 text_spacing, 
+								 },
+								 font_size,
+								 text_spacing,
 								 RAYWHITE);
 		}
 
@@ -353,6 +353,16 @@ void handle_keyboard_input(void)
 				if (strstr(get_file_path(paths[i]), search_string) != NULL) {
 					last_selected_tile_pos.x = i % tpr;
 					last_selected_tile_pos.y = i / tpr;
+
+					const int tile_row = last_selected_tile_pos.y;
+					const int visible_rows = GetScreenHeight() / (tile_height + tile_spacing);
+					const int first_visible_row = scroll_offset_y / (tile_height + tile_spacing);
+					const int last_visible_row = first_visible_row + visible_rows - 1;
+
+					if (tile_row < first_visible_row || tile_row > last_visible_row) {
+						scroll_offset_y = tile_row * (tile_height + tile_spacing);
+					}
+
 					break;
 				}
 			}
@@ -445,7 +455,7 @@ void handle_keyboard_input(void)
 		last_selected_tile_pos.x--;
 	} break;
 
-	case KEY_S: case KEY_DOWN: 
+	case KEY_S: case KEY_DOWN:
 	if (last_selected_tile_pos.y < total_rows - 1) {
 		if (!(last_selected_tile_pos.y == total_rows - 2
 		&& last_selected_tile_pos.x >= tiles_in_last_row))
@@ -946,7 +956,7 @@ int main(const int argc, char *argv[])
 			UnloadTexture(*img_map[i].value.loaded_texture);
 		}
 	}
-	
+
 	for (const auto& proc: procs) {
 		nob_proc_wait(proc, true);
 	}
