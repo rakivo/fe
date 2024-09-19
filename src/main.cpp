@@ -996,4 +996,5 @@ int main(const int argc, char *argv[])
 /* TODO:
 	2. Implement search
 	3. Implement auto-completion in the search mode
+	4. Fix resize of images
 */
