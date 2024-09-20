@@ -81,6 +81,7 @@ NORETURN void error_exit(const char *format, ...);
 #ifdef SCRATCH_BUFFER_IMPLEMENTATION
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
