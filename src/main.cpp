@@ -41,6 +41,7 @@ using namespace TagLib;
 #define TILE_COLOR DARKGRAY
 #define BACKGROUND_COLOR ((Color) {24, 24, 24, 255})
 #define CLICKED_TILE_COLOR ((Color) {40, 40, 40, 255})
+#define MATCHED_TILE_COLOR ((Color) {40, 160, 150, 255})
 #define SEARCH_WINDOW_BACKGROUND_COLOR ((Color) {65, 65, 65, 215})
 
 #define MAX_PATH_SIZE (256 + 1)
@@ -75,6 +76,7 @@ static float scroll_speed = DEFAULT_SCROLL_SPEED;
 #define tile_full_height (tile_height + tile_spacing)
 
 static bool search_mode = false;
+static bool typing_search = false;
 static char search_string[MAX_PATH_SIZE] = {0};
 static size_t search_string_size = 0;
 
@@ -113,6 +115,9 @@ static bool placeholder_resized = false;
 
 static std::vector<Nob_Proc> procs = {};
 static std::vector<Texture2D> to_unload = {};
+
+static size_t last_matched_idx = 1;
+static std::vector<size_t> matched_idxs = {};
 
 #define DEFINE_SIZE(what) \
 	const size_t what##_SIZE = sizeof(what) / sizeof(*what)
@@ -191,6 +196,18 @@ INLINE void *copy_img_data(const Image *img)
 	return data;
 }
 
+INLINE static void update_selected_tile_if_its_not_visible(void)
+{
+	const int tile_row = selected_tile_pos.y;
+	const int visible_rows = GetScreenHeight() / (tile_height + tile_spacing);
+	const int first_visible_row = scroll_offset_y / (tile_height + tile_spacing);
+	const int last_visible_row = first_visible_row + visible_rows - 1;
+
+	if (tile_row < first_visible_row || tile_row > last_visible_row) {
+		scroll_offset_y = tile_row * (tile_height + tile_spacing);
+	}
+}
+
 static void set_new_scale(float new_scale)
 {
 	scale				 = new_scale;
@@ -212,6 +229,8 @@ static void set_new_scale(float new_scale)
 		placeholder_texture = LoadTextureFromImage(placeholder_scaled);
 		placeholder_resized = false;
 	}
+
+	update_selected_tile_if_its_not_visible();
 }
 
 static void read_dir(void)
@@ -283,6 +302,15 @@ INLINE static void preserve_tile_pos(size_t tile_idx)
 	}
 }
 
+INLINE static Vector2 path_idx_to_tile_pos(size_t path_idx)
+{
+	const size_t tpr = get_tiles_per_row();
+	return (Vector2) {
+		.x = path_idx % tpr,
+		.y = path_idx / tpr
+	};
+}
+
 INLINE static Vector2 get_tile_pos(size_t tile_pos_x, size_t tile_pos_y)
 {
 	return (Vector2) {
@@ -316,6 +344,14 @@ INLINE static void enter_dir(char *dir, size_t tile_idx)
 	preserve_tile_pos(tile_idx);
 }
 
+static INLINE void stop_search_mode(void)
+{
+	search_mode = false;
+	matched_idxs.clear();
+	memset(search_string, 0, search_string_size);
+	search_string_size = 0;
+}
+
 static void handle_enter(char *file_path);
 
 static void handle_keyboard_input(void)
@@ -324,12 +360,38 @@ static void handle_keyboard_input(void)
 
 	int key = GetKeyPressed();
 	if (search_mode) {
-		if (key == KEY_ESCAPE) {
-			search_mode = false;
-			memset(search_string, 0, search_string_size);
-			search_string_size = 0;
+		if (typing_search) goto draw_search;
+
+		if (key == KEY_ESCAPE || key == KEY_ENTER) {
+			stop_search_mode();
+			return;
+		} else if (key == KEY_N) {
+			if (last_matched_idx >= matched_idxs.size()) return;
+
+			const size_t idx = matched_idxs[last_matched_idx++];
+			const Vector2 new_selected_tile_pos = path_idx_to_tile_pos(idx);
+
+			selected_tile_pos.x = new_selected_tile_pos.x;
+			selected_tile_pos.y = new_selected_tile_pos.y;
+
+			update_selected_tile_if_its_not_visible();
+			return;
+		} else if (key == KEY_P) {
+			if (last_matched_idx == 0) return;
+
+			const size_t idx = matched_idxs[last_matched_idx--];
+			const Vector2 new_selected_tile_pos = path_idx_to_tile_pos(idx);
+
+			selected_tile_pos.x = new_selected_tile_pos.x;
+			selected_tile_pos.y = new_selected_tile_pos.y;
+
+			update_selected_tile_if_its_not_visible();
 			return;
 		}
+
+		if (!typing_search) return;
+
+draw_search:
 
 		const int w = GetScreenWidth();
 		const int h = GetScreenHeight();
@@ -350,7 +412,7 @@ static void handle_keyboard_input(void)
 		}
 
 		if (key == KEY_ENTER) {
-			search_mode = false;
+			typing_search = false;
 			if (search_string_size < 1) return;
 
 			for (size_t i = 0; i < paths.size(); ++i) {
@@ -360,19 +422,13 @@ static void handle_keyboard_input(void)
 				for (char *p = scratch_buffer.str; p != NULL && *p != '\0'; *p = tolower(*p), p++);
 
 				if (strstr(scratch_buffer.str, search_string) != NULL) {
-					selected_tile_pos.x = i % tpr;
-					selected_tile_pos.y = i / tpr;
-
-					const int tile_row = selected_tile_pos.y;
-					const int visible_rows = GetScreenHeight() / (tile_height + tile_spacing);
-					const int first_visible_row = scroll_offset_y / (tile_height + tile_spacing);
-					const int last_visible_row = first_visible_row + visible_rows - 1;
-
-					if (tile_row < first_visible_row || tile_row > last_visible_row) {
-						scroll_offset_y = tile_row * (tile_height + tile_spacing);
+					if (matched_idxs.empty()) {
+						const Vector2 new_selected_tile_pos = path_idx_to_tile_pos(i);
+						selected_tile_pos.x = new_selected_tile_pos.x;
+						selected_tile_pos.y = new_selected_tile_pos.y;
+						update_selected_tile_if_its_not_visible();
 					}
-
-					break;
+					matched_idxs.emplace_back(i);
 				}
 			}
 
@@ -426,6 +482,7 @@ static void handle_keyboard_input(void)
 	switch (key) {
 	case KEY_SLASH: {
 		search_mode = true;
+		typing_search = true;
 		return;
 	} break;
 
@@ -784,8 +841,6 @@ uint8_t *try_get_album_cover(const char *file_path, size_t *data_size)
 	const auto *picture_frame = (ID3v2::AttachedPictureFrame *) (frames.front());
 	if (!picture_frame) return NULL;
 
-	const char *mime_type = picture_frame->mimeType().toCString();
-
 	const ByteVector &image_data = picture_frame->picture();
 
 	const size_t size = image_data.size();
@@ -864,6 +919,14 @@ static void fill_img_map(void)
 	}
 }
 
+INLINE static bool tile_is_match(size_t tile_idx)
+{
+	for (const auto &idx: matched_idxs) {
+		if (tile_idx == idx) return true;
+	}
+	return false;
+}
+
 static void render_files(void)
 {
 	const int tpr = get_tiles_per_row();
@@ -880,10 +943,13 @@ static void render_files(void)
 		}
 
 		Color tile_color = TILE_COLOR;
+
 		if (selected_tile_pos.x == tile_pos_x
 		&&  selected_tile_pos.y == tile_pos_y)
 		{
 			tile_color = CLICKED_TILE_COLOR;
+		} else if (tile_is_match(i)) {
+			tile_color = MATCHED_TILE_COLOR;
 		}
 
 		DrawRectangleV(tile_pos, (Vector2){tile_width, tile_height}, tile_color);
@@ -1050,7 +1116,7 @@ int main(const int argc, char *argv[])
 	}
 
 	for (const auto& proc: procs) {
-		nob_proc_wait(proc, true);
+		nob_proc_kill(proc, true);
 	}
 
 	stop_flag = true;

@@ -1,5 +1,14 @@
 // A small subset of <https://github.com/tsoding/musializer/blob/master/nob.h>, just to run commands.
 
+#define _POSIX_C_SOURCE 200112L
+
+#include <stdio.h>
+#include <errno.h>
+#include <unistd.h>
+#include <stdarg.h>
+#include <signal.h>
+#include <string.h>
+
 #include "nob.h"
 
 void nob_cmd_render(Nob_Cmd cmd, Nob_String_Builder *render)
@@ -50,7 +59,7 @@ Nob_Proc nob_cmd_run_async(Nob_Cmd cmd, bool echo)
 			nob_log(NOB_ERROR, "Could not exec child process: %s", strerror(errno));
 			exit(1);
 		}
-		NOB_ASSERT(0 && "unreachable");
+		assert(0 && "unreachable");
 	}
 
 	return cpid;
@@ -69,7 +78,7 @@ void nob_log(Nob_Log_Level level, const char *fmt, ...)
 		fprintf(stderr, "[ERROR] ");
 		break;
 	default:
-		NOB_ASSERT(0 && "unreachable");
+		assert(0 && "unreachable");
 	}
 
 	va_list args;
@@ -79,34 +88,14 @@ void nob_log(Nob_Log_Level level, const char *fmt, ...)
 	fprintf(stderr, "\n");
 }
 
-bool nob_proc_wait(Nob_Proc proc, bool echo)
+bool nob_proc_kill(Nob_Proc proc, bool echo)
 {
 	if (proc == NOB_INVALID_PROC) return false;
 
-	for (;;) {
-		int wstatus = 0;
-		if (waitpid(proc, &wstatus, 0) < 0) {
-			if (echo) nob_log(NOB_ERROR, "could not wait on command (pid %d): %s", proc, strerror(errno));
-			return false;
-		}
-
-		if (WIFEXITED(wstatus)) {
-			int exit_status = WEXITSTATUS(wstatus);
-			if (exit_status != 0) {
-				if (echo) nob_log(NOB_ERROR, "command exited with exit code %d", exit_status);
-				return false;
-			}
-
-			break;
-		}
+	if (kill(proc, SIGTERM) == -1) {
+		if (echo) nob_log(NOB_ERROR, "error killing process %d: %s\n");
+		return false;
 	}
 
 	return true;
-}
-
-bool nob_cmd_run_sync(Nob_Cmd cmd, bool echo)
-{
-	Nob_Proc p = nob_cmd_run_async(cmd, echo);
-	if (p == NOB_INVALID_PROC) return false;
-	return nob_proc_wait(p, echo);
 }
