@@ -90,10 +90,8 @@ static double last_click_time = 0.0;
 
 typedef struct {int x, y;} Vector2i;
 static float last_scroll_offset_y = 0.0;
-static Vector2i last_selected_tile_pos = {0};
-static Vector2i last_selected_tile_pos_before_entering_dir = {0};
-
-static std::vector<Nob_Proc> procs = {};
+static Vector2i selected_tile_pos = {0};
+static Vector2i selected_tile_pos_before_entering_dir = {0};
 
 static float scroll_offset_y = 0.0;
 
@@ -111,6 +109,9 @@ static Image placeholder_src = {0};
 static Image placeholder_scaled = {0};
 static Texture2D placeholder_texture = {0};
 static bool placeholder_resized = false;
+
+static std::vector<Nob_Proc> procs = {};
+static std::vector<Texture2D> to_unload = {};
 
 typedef struct {
 	Image src_img;
@@ -130,12 +131,12 @@ typedef struct { char *str; size_t ino; } path_ino_t;
 std::vector<path_ino_t> paths = {};
 
 // in millis
-#define PREVIEW_LOADER_SLEEP_TIME 555
+#define PREVIEW_LOADER_SLEEP_TIME 256
 
+// Flags to communicate with the thread that loads previews
 static bool stop_flag = false;
 static bool idle_flag = false;
 static bool new_scale_flag = false;
-static bool resizing_now_flag = false;
 
 static void resize_img(Image *image, int tw, int th);
 static bool load_preview(const char *ext, const char *file_path, Image *img);
@@ -173,8 +174,8 @@ static void set_new_scale(float new_scale)
 	UnloadFont(font);
 	font = LoadFontEx(FONT_PATH, font_size, NULL, 0);
 
-	idle_flag = false;
 	new_scale_flag = true;
+	idle_flag = false;
 
 	if (placeholder_resized) {
 		UnloadTexture(placeholder_texture);
@@ -243,7 +244,7 @@ INLINE int get_tiles_per_row(void)
 	return GetScreenWidth() / (tile_width + tile_spacing);
 }
 
-static char *enter_dir(const char *dir_path)
+INLINE static char *join_dir(const char *dir_path)
 {
 	scratch_buffer_clear();
 	scratch_buffer_append(curr_dir);
@@ -252,16 +253,16 @@ static char *enter_dir(const char *dir_path)
 	return scratch_buffer_copy();
 }
 
-static void preserve_tile_pos(size_t tile_idx)
+INLINE static void preserve_tile_pos(size_t tile_idx)
 {
 	if (streq(paths[tile_idx].str, "..")) {
 		scroll_offset_y = last_scroll_offset_y;
-		last_selected_tile_pos.x = last_selected_tile_pos_before_entering_dir.x;
-		last_selected_tile_pos.y = last_selected_tile_pos_before_entering_dir.y;
+		selected_tile_pos.x = selected_tile_pos_before_entering_dir.x;
+		selected_tile_pos.y = selected_tile_pos_before_entering_dir.y;
 	} else {
-		last_selected_tile_pos_before_entering_dir.x = last_selected_tile_pos.x;
-		last_selected_tile_pos_before_entering_dir.y = last_selected_tile_pos.y;
-		memset(&last_selected_tile_pos, 0, sizeof(last_selected_tile_pos));
+		selected_tile_pos_before_entering_dir.x = selected_tile_pos.x;
+		selected_tile_pos_before_entering_dir.y = selected_tile_pos.y;
+		memset(&selected_tile_pos, 0, sizeof(selected_tile_pos));
 		last_scroll_offset_y = scroll_offset_y;
 		scroll_offset_y = 0.0;
 	}
@@ -287,7 +288,7 @@ INLINE static char *get_extension(char *src)
 	return NULL;
 }
 
-void handle_enter(char *file_path)
+static void handle_enter(char *file_path)
 {
 	char *ext = get_extension(file_path);
 	if (streq(ext, "mp4")
@@ -310,6 +311,19 @@ void handle_enter(char *file_path)
 	}
 }
 
+static void fill_img_map(void);
+
+INLINE static void enter_dir(char *dir, size_t tile_idx)
+{
+	curr_dir = dir;
+	idle_flag = true;
+	paths.clear();
+	read_dir();
+	fill_img_map();
+	idle_flag = false;
+	preserve_tile_pos(tile_idx);
+}
+
 void handle_keyboard_input(void)
 {
 	const int tpr = get_tiles_per_row();
@@ -326,7 +340,7 @@ void handle_keyboard_input(void)
 								 search_string,
 								 (Vector2) {
 									 SEARCH_TEXT_SPACING,
-									 h - SEARCH_TEXT_HEIGHT,
+									 h - SEARCH_TEXT_HEIGHT
 								 },
 								 font_size,
 								 text_spacing,
@@ -345,10 +359,10 @@ void handle_keyboard_input(void)
 				for (char *p = scratch_buffer.str; p != NULL && *p != '\0'; *p = tolower(*p), p++);
 
 				if (strstr(scratch_buffer.str, search_string) != NULL) {
-					last_selected_tile_pos.x = i % tpr;
-					last_selected_tile_pos.y = i / tpr;
+					selected_tile_pos.x = i % tpr;
+					selected_tile_pos.y = i / tpr;
 
-					const int tile_row = last_selected_tile_pos.y;
+					const int tile_row = selected_tile_pos.y;
 					const int visible_rows = GetScreenHeight() / (tile_height + tile_spacing);
 					const int first_visible_row = scroll_offset_y / (tile_height + tile_spacing);
 					const int last_visible_row = first_visible_row + visible_rows - 1;
@@ -415,20 +429,14 @@ void handle_keyboard_input(void)
 	} break;
 
 	case KEY_ENTER: {
-		size_t idx = last_selected_tile_pos.x;
-		if (last_selected_tile_pos.y > 0) {
-			idx += last_selected_tile_pos.y * tpr;
-		}
+		size_t idx = selected_tile_pos.x +
+								 selected_tile_pos.y *
+								 tpr;
 
-		char *tmp = enter_dir(paths[idx].str);
+		char *tmp = join_dir(paths[idx].str);
 		switch (get_file_type(tmp)) {
 		case FILE_DIRECTORY: {
-			curr_dir = tmp;
-			idle_flag = true;
-			paths.clear();
-			read_dir();
-			idle_flag = false;
-			preserve_tile_pos(idx);
+			enter_dir(tmp, idx);
 		} break;
 
 		case FILE_REGULAR: {
@@ -439,38 +447,41 @@ void handle_keyboard_input(void)
 		}
 	} break;
 
-	case KEY_W: case KEY_UP: if (last_selected_tile_pos.y > 0) {
-		last_selected_tile_pos.y--;
-		const int relative_tile_y = last_selected_tile_pos.y - top_visible_tile;
+	case KEY_W: case KEY_UP:
+	if (selected_tile_pos.y > 0) {
+		selected_tile_pos.y--;
+		const int relative_tile_y = selected_tile_pos.y - top_visible_tile;
 		if (relative_tile_y == -1) {
 			scroll_offset_y -= (float) tile_full_height;
 		}
 	} break;
 
-	case KEY_A: case KEY_LEFT: if (last_selected_tile_pos.x > 0) {
-		last_selected_tile_pos.x--;
+	case KEY_A: case KEY_LEFT:
+	if (selected_tile_pos.x > 0) {
+		selected_tile_pos.x--;
 	} break;
 
 	case KEY_S: case KEY_DOWN:
-	if (last_selected_tile_pos.y < total_rows - 1) {
-		if (!(last_selected_tile_pos.y == total_rows - 2
-		&& last_selected_tile_pos.x >= tiles_in_last_row))
+	if (selected_tile_pos.y < total_rows - 1) {
+		if (!(selected_tile_pos.y == total_rows - 2
+		&& selected_tile_pos.x >= tiles_in_last_row))
 		{
-			last_selected_tile_pos.y++;
+			selected_tile_pos.y++;
 		}
 
-		const int relative_tile_y = last_selected_tile_pos.y - top_visible_tile;
+		const int relative_tile_y = selected_tile_pos.y - top_visible_tile;
 		if (tpc == relative_tile_y) {
 			scroll_offset_y += (float) tile_full_height;
 		}
 	} break;
 
-	case KEY_D: case KEY_RIGHT: if (last_selected_tile_pos.y == total_rows - 1) {
-		if (last_selected_tile_pos.x < tiles_in_last_row - 1) {
-			last_selected_tile_pos.x++;
+	case KEY_D: case KEY_RIGHT:
+	if (selected_tile_pos.y == total_rows - 1) {
+		if (selected_tile_pos.x < tiles_in_last_row - 1) {
+			selected_tile_pos.x++;
 		}
-	} else if (last_selected_tile_pos.x < tpr - 1) {
-		last_selected_tile_pos.x++;
+	} else if (selected_tile_pos.x < tpr - 1) {
+		selected_tile_pos.x++;
 	} break;
 	}
 }
@@ -516,15 +527,10 @@ void handle_mouse_input(void)
 		if ((curr_time - last_click_time) <= DOUBLE_CLICK_THRESHOLD
 		&& CheckCollisionPointRec(last_click_pos, tile_rect))
 		{
-			char *tmp = enter_dir(paths[i].str);
+			char *tmp = join_dir(paths[i].str);
 			switch (get_file_type(tmp)) {
 			case FILE_DIRECTORY: {
-				curr_dir = tmp;
-				paths.clear();
-				idle_flag = true;
-				read_dir();
-				idle_flag = false;
-				preserve_tile_pos(i);
+				enter_dir(tmp, i);
 			} break;
 
 			case FILE_REGULAR: {
@@ -537,8 +543,8 @@ void handle_mouse_input(void)
 
 		last_click_pos = mouse_pos;
 		last_click_time = curr_time;
-		last_selected_tile_pos.x = tile_pos_x;
-		last_selected_tile_pos.y = tile_pos_y;
+		selected_tile_pos.x = tile_pos_x;
+		selected_tile_pos.y = tile_pos_y;
 		break;
 	}
 }
@@ -584,7 +590,7 @@ static void draw_text_boxed_selectable(Font font,
 	float textOffsetY = 0;
 	float textOffsetX = 0.0f;
 
-	float scaleFactor = font_size/(float)font.baseSize;
+	float scaleFactor = font_size / (float) font.baseSize;
 
 	enum { MEASURE_STATE = 0, DRAW_STATE = 1 };
 	int state = word_wrap? MEASURE_STATE : DRAW_STATE;
@@ -667,7 +673,7 @@ static void draw_text_boxed_selectable(Font font,
 				if ((codepoint != ' ') && (codepoint != '\t'))
 				{
 					DrawTextCodepoint(font, codepoint,
-														(Vector2){ rec.x + textOffsetX, rec.y + textOffsetY },
+														(Vector2){rec.x + textOffsetX, rec.y + textOffsetY},
 														font_size,
 														isGlyphSelected? selectTint : tint);
 				}
@@ -741,13 +747,16 @@ static void resize_img(Image *img, int tw, int th)
 	ImageResize(img, nw, nh);
 }
 
+INLINE static void resize_img_to_size_of_tile(Image *img)
+{
+	resize_img(img,
+						 tile_width	 - text_padding,
+						 tile_height - text_padding);
+}
+
 static bool load_preview(const char *ext, const char *file_path, Image *img)
 {
 	if (strcmp(ext, "mp4") == 0) {
-		// clock_t start = clock();
-		// clock_t end = clock();
-		// double elapsed = (double) (end - start) / CLOCKS_PER_SEC;
-
 		Mat frame = {};
 		uint8_t *data = load_first_frame(file_path, &frame);
 
@@ -767,13 +776,13 @@ static bool load_preview(const char *ext, const char *file_path, Image *img)
 	return false;
 }
 
-static void init_img_map(void)
+// fill img map with placeholder textures
+static void fill_img_map(void)
 {
 	Image scaled_img = placeholder_src;
 	scaled_img.data = copy_img_data(&placeholder_src);
-	resize_img(&scaled_img,
-						 tile_width - text_padding,
-						 tile_height - text_padding);
+
+	resize_img_to_size_of_tile(&scaled_img);
 
 	img_value_t img = {
 		.src_img = placeholder_src,
@@ -787,10 +796,8 @@ static void init_img_map(void)
 	}
 }
 
-void render_files(void)
+static void render_files(void)
 {
-	if (resizing_now_flag) return;
-
 	const int tpr = get_tiles_per_row();
 	for (size_t i = 0; i < paths.size(); ++i) {
 		const int tile_pos_x = i % tpr;
@@ -805,16 +812,16 @@ void render_files(void)
 		}
 
 		Color tile_color = TILE_COLOR;
-		if (last_selected_tile_pos.x == tile_pos_x
-		&&  last_selected_tile_pos.y == tile_pos_y)
+		if (selected_tile_pos.x == tile_pos_x
+		&&  selected_tile_pos.y == tile_pos_y)
 		{
 			tile_color = CLICKED_TILE_COLOR;
 		}
 
 		DrawRectangleV(tile_pos, (Vector2){tile_width, tile_height}, tile_color);
 
-		if (last_selected_tile_pos.x == tile_pos_x
-		&&	last_selected_tile_pos.y == tile_pos_y)
+		if (selected_tile_pos.x == tile_pos_x
+		&&	selected_tile_pos.y == tile_pos_y)
 		{
 			const Rectangle tile_rect =	get_tile_rect(&tile_pos);
 			draw_text_boxed(font, paths[i].str, tile_rect, true, WHITE);
@@ -850,7 +857,15 @@ void render_files(void)
 	}
 }
 
-void load_previews(void)
+static Image scale_img(const Image *src_img)
+{
+	Image scaled_img = *src_img;
+	scaled_img.data = copy_img_data(src_img);
+	resize_img_to_size_of_tile(&scaled_img);
+	return scaled_img;
+}
+
+static void load_previews(void)
 {
 	while (!stop_flag) {
 		if (idle_flag) continue;
@@ -869,36 +884,28 @@ void load_previews(void)
 			int idx = hmgeti(img_map, path_ino.ino);
 
 			if (prev_scale_flag) {
-				resizing_now_flag = true;
-
 				img_map_t *p = hmgetp(img_map, path_ino.ino);
 
 				if (img_map[idx].value.is_placeholder) {
 					UnloadImage(placeholder_scaled);
+					to_unload.emplace_back(placeholder_texture);
 
-					Image scaled_placeholder = placeholder_src;
-					scaled_placeholder.data = copy_img_data(&placeholder_src);
-
-					resize_img(&scaled_placeholder,
-										 tile_width - text_padding,
-										 tile_height - text_padding);
-
-					placeholder_scaled = scaled_placeholder;
-
-					resizing_now_flag = false;
+					placeholder_scaled = scale_img(&placeholder_src);
 					placeholder_resized = true;
 					continue;
 				}
 
-				Image new_scaled_img = p->value.src_img;
-				new_scaled_img.data = copy_img_data(&p->value.src_img);
+				if (p->value.scaled_img.data != NULL) {
+					UnloadImage(p->value.scaled_img);
+				}
 
-				resize_img(&new_scaled_img,
-									 tile_width - text_padding,
-									 tile_height - text_padding);
+				p->value.scaled_img =	scale_img(&p->value.src_img);
 
-				p->value.scaled_img = new_scaled_img;
-				resizing_now_flag = false;
+				if (p->value.loaded_texture) {
+					to_unload.emplace_back(*p->value.loaded_texture);
+				}
+
+				p->value.loaded_texture = std::nullopt;
 				continue;
 			} else if (!img_map[idx].value.is_placeholder) continue;
 
@@ -918,9 +925,7 @@ void load_previews(void)
 			Image scaled_img = src_img;
 			scaled_img.data = copy_img_data(&src_img);
 
-			resize_img(&scaled_img,
-								 tile_width - text_padding,
-								 tile_height - text_padding);
+			resize_img_to_size_of_tile(&scaled_img);
 
 			img_value_t value = {
 				.src_img = src_img,
@@ -957,7 +962,7 @@ int main(const int argc, char *argv[])
 	placeholder_src = LoadImage(PLACEHOLDER_PATH);
 	placeholder_texture =	LoadTextureFromImage(placeholder_src);
 
-	init_img_map();
+	fill_img_map();
 
 	std::thread preview_loader = std::thread(load_previews);
 
@@ -970,17 +975,26 @@ int main(const int argc, char *argv[])
 		EndDrawing();
 	}
 
+	for (const auto& proc: procs) {
+		nob_proc_wait(proc, true);
+	}
+
 	stop_flag = true;
 	preview_loader.join();
 
 	for (long i = 0; i < hmlen(img_map); ++i) {
+		if (!img_map[i].value.is_placeholder) {
+			UnloadImage(img_map[i].value.scaled_img);
+			UnloadImage(img_map[i].value.src_img);
+		}
+
 		if (img_map[i].value.loaded_texture) {
 			UnloadTexture(*img_map[i].value.loaded_texture);
 		}
 	}
 
-	for (const auto& proc: procs) {
-		nob_proc_wait(proc, true);
+	for (const auto &texture: to_unload) {
+		UnloadTexture(texture);
 	}
 
 	UnloadImage(placeholder_src);
