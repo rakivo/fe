@@ -1,7 +1,9 @@
+#include <ftw.h>
 #include <time.h>
 #include <stdio.h>
 #include <string.h>
 #include <dirent.h>
+#include <unistd.h>
 #include <stdbool.h>
 #include <sys/stat.h>
 
@@ -43,6 +45,7 @@ using namespace TagLib;
 #define CLICKED_TILE_COLOR ((Color) {40, 40, 40, 255})
 #define MATCHED_TILE_COLOR ((Color) {40, 160, 150, 255})
 #define SEARCH_WINDOW_BACKGROUND_COLOR ((Color) {65, 65, 65, 215})
+#define IS_DELETE_WINDOW_BACKGROUND_COLOR ((Color) {50, 50, 50, 225})
 
 #define MAX_PATH_SIZE (256 + 1)
 
@@ -75,13 +78,15 @@ static float scroll_speed = DEFAULT_SCROLL_SPEED;
 
 #define tile_full_height (tile_height + tile_spacing)
 
+static bool delete_mode = false;
+static bool is_delete_rec = false;
+
 static bool search_mode = false;
 static bool typing_search = false;
 static char search_string[MAX_PATH_SIZE] = {0};
 static size_t search_string_size = 0;
 
 #define key_is_printable(key) (key >= 39 && key <= 96)
-#define key_is_alpha(key) (key >= KEY_A && key <= KEY_Z)
 
 static char *curr_dir = ".";
 
@@ -165,10 +170,10 @@ typedef struct {
 static img_map_t *img_map = NULL;
 
 struct path_t {
-	bool abs;
 	char *str;
 	size_t ino;
 	uint8_t type;
+	bool abs, deleted;
 };
 
 std::vector<path_t> paths = {};
@@ -243,7 +248,6 @@ static void read_dir(void)
 	DIR *dir = opendir(curr_dir);
 	if (dir == NULL) {
 		eprintf("could not open directory %s: %s", curr_dir, strerror(errno));
-		if (dir) closedir(dir);
 		assert(0 && "unreachable");
 	}
 
@@ -254,7 +258,13 @@ static void read_dir(void)
 			char *file_path = str_copy(e->d_name, strlen(e->d_name));
 			size_t ino = (size_t) e->d_ino;
 			uint8_t type = (uint8_t) e->d_type;
-			paths.emplace_back((path_t) {false, file_path, ino, type});
+			paths.emplace_back((path_t) {
+				.str = file_path,
+				.ino = ino,
+				.type = type,
+				.abs = false,
+				.deleted = false
+			});
 		}
 		e = readdir(dir);
 	}
@@ -368,13 +378,125 @@ INLINE static void stop_search_mode(void)
 	search_string_size = 0;
 }
 
+INLINE static void stop_delete_mode(void)
+{
+	delete_mode = false;
+	is_delete_rec = false;
+}
+
+INLINE static void str_tolower(char *str)
+{
+	for (char *p = str; p != NULL && *p != '\0'; p++, *p = tolower(*p));
+}
+
+INLINE static size_t get_tile_idx_from_tile_pos(Vector2i pos)
+{
+	return pos.x + pos.y * get_tiles_per_row();
+}
+
+static void draw_text_truncated(const char *text,
+																Vector2 pos,
+																float max_text_width,
+																Color color);
+
+static size_t draw_is_delete(void)
+{
+	const int w = GetScreenWidth();
+	const int h = GetScreenHeight();
+
+	const int rw = w / 3;
+	const int rh = h / 6;
+	const int rx = (w - rw) / 2;
+	const int ry = (h - rh) / 2;
+
+	DrawRectangle(rx, ry, rw, rh, IS_DELETE_WINDOW_BACKGROUND_COLOR);
+
+	const size_t tile_idx = get_tile_idx_from_tile_pos(selected_tile_pos);
+	char *file_path = paths[tile_idx].str;
+
+	if (is_delete_rec) {
+		scratch_buffer_clear();
+		scratch_buffer_printf("delete %s recursively? [y/n]", file_path);
+	} else {
+		scratch_buffer_clear();
+		scratch_buffer_printf("delete %s? [y/n]", file_path);
+	}
+
+	char *text = scratch_buffer_to_string();
+
+	const Vector2 ts = MeasureTextEx(font, text, font_size, text_spacing);
+
+	const Vector2 tp = {
+		rx + (rw - ts.x) / 2,
+		ry + (rh - ts.y) / 2
+	};
+
+	draw_text_truncated(text, tp, rw, RAYWHITE);
+	return tile_idx;
+}
+
 static void handle_enter(char *file_path);
+
+static int rm_file_callback(const char *file_path,
+														const struct stat *,
+														int ,
+														struct FTW *)
+{
+	if (remove(file_path) < 0) {
+		perror("ERROR: remove");
+		return -1;
+	}
+	return 0;
+}
 
 static void handle_keyboard_input(void)
 {
+	int key = GetKeyPressed();
+	if (delete_mode) {
+		if (key == KEY_ESCAPE) {
+			stop_delete_mode();
+			return;
+		}
+
+		const size_t tile_idx = draw_is_delete();
+
+		if (key == KEY_Y) {
+			if (is_delete_rec) {
+				stop_delete_mode();
+
+				nftw(paths[tile_idx].str,
+						 rm_file_callback,
+						 10,
+						 FTW_DEPTH | FTW_MOUNT|FTW_PHYS);
+
+				paths[tile_idx].deleted = true;
+			} else if (paths[tile_idx].type == DT_DIR) {
+				stop_delete_mode();
+				return;
+			}
+
+			stop_delete_mode();
+
+			errno = 0;
+
+			if (remove(paths[tile_idx].str) == -1) {
+				eprintf("failed to remove %s: %s\n",
+								paths[tile_idx].str,
+								strerror(errno));
+				return;
+			}
+
+			paths[tile_idx].deleted = true;
+		} else if (key == KEY_N) {
+			is_delete_rec = false;
+			delete_mode = false;
+		}
+
+		return;
+	}
+
 	const int tpr = get_tiles_per_row();
 
-	int key = GetKeyPressed();
 	if (search_mode) {
 		const int w = GetScreenWidth();
 		const int h = GetScreenHeight();
@@ -450,11 +572,15 @@ draw_search:
 			typing_search = false;
 			if (search_string_size < 1) return;
 
+			str_tolower(search_string);
+
 			for (size_t i = 0; i < paths.size(); ++i) {
+				if (paths[i].deleted) continue;
+
 				scratch_buffer_clear();
 				scratch_buffer_append(paths[i].str);
 
-				for (char *p = scratch_buffer.str; p != NULL && *p != '\0'; *p = tolower(*p), p++);
+				str_tolower(scratch_buffer.str);
 
 				if (strstr(scratch_buffer.str, search_string) != NULL) {
 					if (matched_idxs.empty()) {
@@ -467,7 +593,7 @@ draw_search:
 				}
 			}
 
-			if (matched_idxs.size() == 1) {
+			if (matched_idxs.size() <= 1) {
 				stop_search_mode();
 			}
 
@@ -475,7 +601,7 @@ draw_search:
 			search_string_size = 0;
 		} else if (key == KEY_SPACE || key_is_printable(key)) {
 			if (search_string_size == MAX_PATH_SIZE) return;
-			if (key_is_alpha(key)) {
+			if (!IsKeyDown(KEY_LEFT_SHIFT)) {
 				key = tolower(key);
 			}
 			search_string[search_string_size++] = key;
@@ -526,10 +652,7 @@ draw_search:
 	} break;
 
 	case KEY_ENTER: {
-		size_t idx = selected_tile_pos.x +
-								 selected_tile_pos.y *
-								 tpr;
-
+		size_t idx = get_tile_idx_from_tile_pos(selected_tile_pos);
 		char *tmp = join_dir(paths[idx].str);
 		switch (paths[idx].type) {
 		case DT_DIR: {
@@ -589,6 +712,11 @@ draw_search:
 	} break;
 
 	case KEY_D: case KEY_RIGHT:
+	if (IsKeyDown(KEY_LEFT_SHIFT)) {
+		delete_mode = true;
+		return;
+	}
+
 	if (selected_tile_pos.y == total_rows - 1) {
 		if (selected_tile_pos.x < tiles_in_last_row - 1) {
 			selected_tile_pos.x++;
@@ -630,6 +758,8 @@ static void handle_mouse_input(void)
 	Vector2 mouse_pos = GetMousePosition();
 
 	for (size_t i = 0; i < paths.size(); ++i) {
+		if (paths[i].deleted) continue;
+
 		const int tile_pos_x = i % tpr;
 		const int tile_pos_y = i / tpr;
 
@@ -663,10 +793,10 @@ static void handle_mouse_input(void)
 	}
 }
 
-static void draw_truncated_text(const char *text,
-												 Vector2 pos,
-												 float max_text_width,
-												 Color color)
+static void draw_text_truncated(const char *text,
+																Vector2 pos,
+																float max_text_width,
+																Color color)
 {
 	const float text_width = MeasureTextEx(font, text, font_size, text_spacing).x;
 
@@ -722,8 +852,7 @@ static void draw_text_boxed_selectable(Font font,
 		i += (codepointByteCount - 1);
 
 		float glyphWidth = 0;
-		if (codepoint != '\n')
-		{
+		if (codepoint != '\n') {
 			glyphWidth = (font.glyphs[index].advanceX == 0) ?
 				font.recs[index].width*scaleFactor :
 				font.glyphs[index].advanceX*scaleFactor;
@@ -784,8 +913,7 @@ static void draw_text_boxed_selectable(Font font,
 					isGlyphSelected = true;
 				}
 
-				if ((codepoint != ' ') && (codepoint != '\t'))
-				{
+				if ((codepoint != ' ') && (codepoint != '\t')) {
 					DrawTextCodepoint(font, codepoint,
 														(Vector2){rec.x + textOffsetX, rec.y + textOffsetY},
 														font_size,
@@ -811,10 +939,10 @@ static void draw_text_boxed_selectable(Font font,
 }
 
 INLINE static void draw_text_boxed(Font font,
-														const char *text,
-														Rectangle rec,
-														bool word_wrap,
-														Color tint)
+																	 const char *text,
+																	 Rectangle rec,
+																	 bool word_wrap,
+																	 Color tint)
 {
 	draw_text_boxed_selectable(font, text, rec, word_wrap, tint, 0, 0, WHITE, WHITE);
 }
@@ -863,11 +991,8 @@ static void resize_img(Image *img, int tw, int th)
 
 INLINE static void resize_img_to_size_of_tile(Image *img)
 {
-	resize_img(img,
-						 tile_width	 - text_padding,
-						 tile_height - text_padding);
+	resize_img(img, tile_width	 - text_padding, tile_height - text_padding);
 }
-
 
 static void handle_enter(char *file_path)
 {
@@ -987,6 +1112,8 @@ static void render_files(void)
 {
 	const int tpr = get_tiles_per_row();
 	for (size_t i = 0; i < paths.size(); ++i) {
+		if (paths[i].deleted) continue;
+
 		const int tile_pos_x = i % tpr;
 		const int tile_pos_y = i / tpr;
 
@@ -1042,7 +1169,7 @@ static void render_files(void)
 			DrawTexture(texture, centered_x, centered_y, WHITE);
 
 			const Vector2 text_pos = get_text_pos(&tile_pos);
-			draw_truncated_text(paths[i].str, text_pos, tile_width - 2 * text_padding, WHITE);
+			draw_text_truncated(paths[i].str, text_pos, tile_width - 2 * text_padding, WHITE);
 		}
 	}
 }
@@ -1089,10 +1216,11 @@ static void handle_dropped_files(void)
 		procs.emplace_back(proc);
 
 		path_t path = {
-			.abs = true,
 			.ino = (size_t) info.st_ino,
 			.str = top_level_file_path_copy,
 			.type = type,
+			.abs = true,
+			.deleted = false,
 		};
 
 		paths.emplace_back(path);
@@ -1193,12 +1321,14 @@ static void load_previews(void)
 
 		for (int i = to_load.size() - 1; i >= 0; --i) {
 			if (idle_flag) break;
+			if (to_load[i].deleted) continue;
 			load_preview(i, to_load[i], to_load.size());
 			to_load.pop_back();
 		}
 
 		for (size_t i = 0; i < paths.size(); ++i) {
 			if (idle_flag) break;
+			if (paths[i].deleted) continue;
 			load_preview(i, paths[i], paths.size());
 		}
 
