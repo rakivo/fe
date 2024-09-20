@@ -13,7 +13,7 @@ CFLAGS := -g -O0 -std=c11
 CXXFLAGS := -g -O0 -std=c++17
 WFLAGS := -Wall -Wextra -Wpedantic -Wno-writable-strings -Wno-c99-extensions -Wno-missing-field-initializers -Wno-c++11-narrowing -Wno-reorder-init-list -Wno-c11-extensions -Wdeprecated
 CXXWFLAGS := -Wno-deprecated-dynamic-exception-spec -Wno-deprecated-dynamic-exception-spec -Wno-deprecated-copy-with-user-provided-dtor
-CLIBS := -lraylib -lopencv_core -lopencv_videoio -lopencv_imgcodecs -lopencv_imgproc
+CLIBS := -lraylib -lopencv_core -lopencv_videoio -lopencv_imgcodecs -lopencv_imgproc -ltag
 INCLUDE_FLAGS := -I/usr/include/opencv4
 
 all: $(BUILD_DIR)/$(BIN_FILE)

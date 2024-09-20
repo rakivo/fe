@@ -16,6 +16,9 @@
 #define STB_DS_IMPLEMENTATION
 #include "stb_ds.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 // only for nob_cmd_run_async
 #include "nob.h"
 
@@ -25,6 +28,12 @@
 #include <opencv2/imgcodecs.hpp>
 
 using namespace cv;
+
+#include "taglib/mpegfile.h"
+#include "taglib/id3v2tag.h"
+#include "taglib/attachedpictureframe.h"
+
+using namespace TagLib;
 
 #define streq(s1, s2) (strcmp(s1, s2) == 0)
 #define eprintf(...) fprintf(stderr, __VA_ARGS__)
@@ -104,6 +113,30 @@ static bool placeholder_resized = false;
 
 static std::vector<Nob_Proc> procs = {};
 static std::vector<Texture2D> to_unload = {};
+
+#define DEFINE_SIZE(what) \
+	const size_t what##_SIZE = sizeof(what) / sizeof(*what)
+
+#define DEFINE_IS(what, array) \
+	INLINE static bool is_##what(const char *ext) \
+	{ \
+		for (size_t i = 0; i < array##_SIZE; ++i) { \
+			if (streq(ext, array[i])) return true; \
+		} \
+		return false; \
+	}
+
+static const char *const VIDEO_FILE_EXTENSIONS[] = {"mp4", "mov", "mkv"};
+DEFINE_SIZE(VIDEO_FILE_EXTENSIONS);
+DEFINE_IS(video, VIDEO_FILE_EXTENSIONS);
+
+static const char *const MUSIC_FILE_EXTENSIONS[] = {"mp3", "wav", "flac", "ogg"};
+DEFINE_SIZE(MUSIC_FILE_EXTENSIONS);
+DEFINE_IS(music, MUSIC_FILE_EXTENSIONS);
+
+static const char *const IMAGE_FILE_EXTENSIONS[] = {"png", "jpg", "bmp", "tga", "psd", "gif", "hdr", "pic", "pnm"};
+DEFINE_SIZE(IMAGE_FILE_EXTENSIONS);
+DEFINE_IS(image, IMAGE_FILE_EXTENSIONS);
 
 typedef struct {
 	Image src_img;
@@ -270,29 +303,6 @@ INLINE static char *get_extension(char *src)
 	return NULL;
 }
 
-static void handle_enter(char *file_path)
-{
-	char *ext = get_extension(file_path);
-	if (streq(ext, "mp4")
-	||	streq(ext, "mov")
-	||	streq(ext, "mkv"))
-	{
-		Nob_Cmd cmd = {0};
-		printf("FILE_PATH: %s\n", file_path);
-		nob_cmd_append(&cmd, "mpv", file_path);
-		const Nob_Proc proc = nob_cmd_run_async(cmd, true);
-		procs.emplace_back(proc);
-	} else if (streq(ext, "png")
-				 ||	 streq(ext, "jpg")
-				 ||	 streq(ext, "jpeg"))
-	{
-		Nob_Cmd cmd = {0};
-		nob_cmd_append(&cmd, "mpv", "--loop", file_path);
-		const Nob_Proc proc = nob_cmd_run_async(cmd, true);
-		procs.emplace_back(proc);
-	}
-}
-
 static void fill_img_map(void);
 
 INLINE static void enter_dir(char *dir, size_t tile_idx)
@@ -306,11 +316,21 @@ INLINE static void enter_dir(char *dir, size_t tile_idx)
 	preserve_tile_pos(tile_idx);
 }
 
+static void handle_enter(char *file_path);
+
 static void handle_keyboard_input(void)
 {
 	const int tpr = get_tiles_per_row();
 
+	int key = GetKeyPressed();
 	if (search_mode) {
+		if (key == KEY_ESCAPE) {
+			search_mode = false;
+			memset(search_string, 0, search_string_size);
+			search_string_size = 0;
+			return;
+		}
+
 		const int w = GetScreenWidth();
 		const int h = GetScreenHeight();
 		const int rh = SEARCH_TEXT_HEIGHT + SEARCH_TEXT_SPACING * 2;
@@ -329,7 +349,6 @@ static void handle_keyboard_input(void)
 								 RAYWHITE);
 		}
 
-		int key = GetKeyPressed();
 		if (key == KEY_ENTER) {
 			search_mode = false;
 			if (search_string_size < 1) return;
@@ -404,7 +423,7 @@ static void handle_keyboard_input(void)
 	const int top_visible_tile = scroll_offset_y / (tile_height + tile_spacing);
 	const int tiles_in_last_row = total_tiles % tpr == 0 ? tpr : total_tiles % tpr;
 
-	switch (GetKeyPressed()) {
+	switch (key) {
 	case KEY_SLASH: {
 		search_mode = true;
 		return;
@@ -736,12 +755,52 @@ INLINE static void resize_img_to_size_of_tile(Image *img)
 						 tile_height - text_padding);
 }
 
+
+static void handle_enter(char *file_path)
+{
+	char *ext = get_extension(file_path);
+	if (is_video(ext) || is_music(ext)) {
+		Nob_Cmd cmd = {0};
+		nob_cmd_append(&cmd, "mpv", file_path);
+		const Nob_Proc proc = nob_cmd_run_async(cmd, true);
+		procs.emplace_back(proc);
+	} else if (is_image(ext)) {
+		Nob_Cmd cmd = {0};
+		nob_cmd_append(&cmd, "mpv", "--loop", file_path);
+		const Nob_Proc proc = nob_cmd_run_async(cmd, true);
+		procs.emplace_back(proc);
+	}
+}
+
+uint8_t *try_get_album_cover(const char *file_path, size_t *data_size)
+{
+	MPEG::File file = MPEG::File(file_path);
+	ID3v2::Tag *id3v2_tag = file.ID3v2Tag();
+
+	if (!id3v2_tag) return NULL;
+	const auto &frames = id3v2_tag->frameListMap()["APIC"];
+	if (frames.isEmpty()) return NULL;
+
+	const auto *picture_frame = (ID3v2::AttachedPictureFrame *) (frames.front());
+	if (!picture_frame) return NULL;
+
+	const char *mime_type = picture_frame->mimeType().toCString();
+
+	const ByteVector &image_data = picture_frame->picture();
+
+	const size_t size = image_data.size();
+
+	*data_size = size;
+
+	uint8_t *data = (uint8_t*) malloc(size);
+	memcpy(data, image_data.data(), size);
+
+	return data;
+}
+
 static bool load_preview(const char *ext, const char *file_path, Image *img)
 {
-	if (streq(ext, "mp4")
-	||	streq(ext, "mkv")
-	||	streq(ext, "mov"))
-	{
+	if (is_video(ext)) {
 		Mat frame = {};
 		uint8_t *data = load_first_frame(file_path, &frame);
 
@@ -753,9 +812,31 @@ static bool load_preview(const char *ext, const char *file_path, Image *img)
 
 		frame.release();
 		return true;
-	} else if (streq(ext, "png")
-				 ||	 streq(ext, "jpg"))
-	{
+	} else if (is_music(ext)) {
+		size_t data_size = 0;
+		uint8_t *data = try_get_album_cover(file_path, &data_size);
+
+		if (data == NULL || data_size == 0) return false;
+
+		int comp = 0;
+		img->data = stbi_load_from_memory(data, data_size, &img->width, &img->height, &comp, 0);
+		if (img->data == NULL) {
+			free(data);
+			return false;
+		}
+
+		if			(comp == 1)	img->format = PIXELFORMAT_UNCOMPRESSED_GRAYSCALE;
+		else if (comp == 2)	img->format = PIXELFORMAT_UNCOMPRESSED_GRAY_ALPHA;
+		else if (comp == 3)	img->format = PIXELFORMAT_UNCOMPRESSED_R8G8B8;
+		else if (comp == 4)	img->format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+		else {
+			free(data);
+			return false;
+		}
+
+		img->mipmaps = 1;
+		return true;
+	} else if (is_image(ext)) {
 		*img = LoadImage(file_path);
 		return true;
 	}
@@ -940,6 +1021,7 @@ int main(const int argc, char *argv[])
 	SetTargetFPS(60);
 	SetConfigFlags(FLAG_WINDOW_RESIZABLE);
 	InitWindow(1000, 600, "fe");
+	SetExitKey(0);
 
 	font = LoadFontEx(FONT_PATH, font_size, NULL, 0);
 
