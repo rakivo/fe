@@ -72,14 +72,6 @@ static size_t search_string_size = 0;
 #define key_is_printable(key) (key >= 39 && key <= 96)
 #define key_is_alpha(key) (key >= KEY_A && key <= KEY_Z)
 
-typedef enum {
-	FILE_POISONED = 0,
-	FILE_REGULAR,
-	FILE_DIRECTORY,
-	FILE_SYMLINK,
-	FILE_OTHER,
-} File_Type;
-
 static char *curr_dir = ".";
 
 static Font font = {0};
@@ -127,8 +119,13 @@ typedef struct {
 
 static img_map_t *img_map = NULL;
 
-typedef struct { char *str; size_t ino; } path_ino_t;
-std::vector<path_ino_t> paths = {};
+typedef struct {
+	char *str;
+	size_t ino;
+	uint8_t type;
+} path_t;
+
+std::vector<path_t> paths = {};
 
 // in millis
 #define PREVIEW_LOADER_SLEEP_TIME 256
@@ -194,14 +191,15 @@ static void read_dir(void)
 	}
 
 	errno = 0;
-	struct dirent *ent = readdir(dir);
-	while (ent != NULL) {
-		if (strcmp(ent->d_name, ".") != 0) {
-			char *file_path = str_copy(ent->d_name, strlen(ent->d_name));
-			size_t ino = (size_t) ent->d_ino;
-			paths.emplace_back((path_ino_t) {file_path, ino});
+	struct dirent *e = readdir(dir);
+	while (e != NULL) {
+		if (!streq(e->d_name, ".")) {
+			char *file_path = str_copy(e->d_name, strlen(e->d_name));
+			size_t ino = (size_t) e->d_ino;
+			uint8_t type = (uint8_t) e->d_type;
+			paths.emplace_back((path_t) {file_path, ino, type});
 		}
-		ent = readdir(dir);
+		e = readdir(dir);
 	}
 
 	if (errno != 0) {
@@ -213,33 +211,17 @@ static void read_dir(void)
 	closedir(dir);
 }
 
-File_Type get_file_type(const char *path)
-{
-	struct stat statbuf;
-	if (stat(path, &statbuf) < 0) {
-		eprintf("could not get stat of %s: %s", path, strerror(errno));
-		return FILE_POISONED;
-	}
-
-	switch (statbuf.st_mode & S_IFMT) {
-		case S_IFDIR:	 return FILE_DIRECTORY;
-		case S_IFREG:	 return FILE_REGULAR;
-		case S_IFLNK:	 return FILE_SYMLINK;
-		default:			 return FILE_OTHER;
-	}
-}
-
-INLINE size_t get_tiles_count(void)
+INLINE static size_t get_tiles_count(void)
 {
 	return paths.size();
 }
 
-INLINE int get_tiles_per_col(void)
+INLINE static int get_tiles_per_col(void)
 {
 	return GetScreenHeight() / (tile_height + tile_spacing);
 }
 
-INLINE int get_tiles_per_row(void)
+INLINE static int get_tiles_per_row(void)
 {
 	return GetScreenWidth() / (tile_width + tile_spacing);
 }
@@ -268,7 +250,7 @@ INLINE static void preserve_tile_pos(size_t tile_idx)
 	}
 }
 
-INLINE Vector2 get_tile_pos(size_t tile_pos_x, size_t tile_pos_y)
+INLINE static Vector2 get_tile_pos(size_t tile_pos_x, size_t tile_pos_y)
 {
 	return (Vector2) {
 		tile_pos_x * (tile_width + tile_spacing) + tile_spacing,
@@ -324,7 +306,7 @@ INLINE static void enter_dir(char *dir, size_t tile_idx)
 	preserve_tile_pos(tile_idx);
 }
 
-void handle_keyboard_input(void)
+static void handle_keyboard_input(void)
 {
 	const int tpr = get_tiles_per_row();
 
@@ -434,12 +416,12 @@ void handle_keyboard_input(void)
 								 tpr;
 
 		char *tmp = join_dir(paths[idx].str);
-		switch (get_file_type(tmp)) {
-		case FILE_DIRECTORY: {
+		switch (paths[idx].type) {
+		case DT_DIR: {
 			enter_dir(tmp, idx);
 		} break;
 
-		case FILE_REGULAR: {
+		case DT_REG: {
 			handle_enter(tmp);
 		} break;
 
@@ -486,7 +468,7 @@ void handle_keyboard_input(void)
 	}
 }
 
-INLINE Vector2 get_text_pos(const Vector2 *tile_pos)
+INLINE static Vector2 get_text_pos(const Vector2 *tile_pos)
 {
 	return (Vector2) {
 		tile_pos->x + text_padding,
@@ -494,7 +476,7 @@ INLINE Vector2 get_text_pos(const Vector2 *tile_pos)
 	};
 }
 
-INLINE Rectangle get_tile_rect(const Vector2 *tile_pos)
+INLINE static Rectangle get_tile_rect(const Vector2 *tile_pos)
 {
 	return (Rectangle) {
 		.x = tile_pos->x + text_padding,
@@ -504,7 +486,7 @@ INLINE Rectangle get_tile_rect(const Vector2 *tile_pos)
 	};
 }
 
-void handle_mouse_input(void)
+static void handle_mouse_input(void)
 {
 	scroll_offset_y -= GetMouseWheelMove() * scroll_speed;
 
@@ -528,12 +510,12 @@ void handle_mouse_input(void)
 		&& CheckCollisionPointRec(last_click_pos, tile_rect))
 		{
 			char *tmp = join_dir(paths[i].str);
-			switch (get_file_type(tmp)) {
-			case FILE_DIRECTORY: {
+			switch (paths[i].type) {
+			case DT_DIR: {
 				enter_dir(tmp, i);
 			} break;
 
-			case FILE_REGULAR: {
+			case DT_REG: {
 				handle_enter(tmp);
 			} break;
 
@@ -549,7 +531,7 @@ void handle_mouse_input(void)
 	}
 }
 
-void draw_truncated_text(const char *text,
+static void draw_truncated_text(const char *text,
 												 Vector2 pos,
 												 float max_text_width,
 												 Color color)
@@ -696,7 +678,7 @@ static void draw_text_boxed_selectable(Font font,
 	}
 }
 
-INLINE void draw_text_boxed(Font font,
+INLINE static void draw_text_boxed(Font font,
 														const char *text,
 														Rectangle rec,
 														bool word_wrap,
@@ -756,7 +738,10 @@ INLINE static void resize_img_to_size_of_tile(Image *img)
 
 static bool load_preview(const char *ext, const char *file_path, Image *img)
 {
-	if (strcmp(ext, "mp4") == 0) {
+	if (streq(ext, "mp4")
+	||	streq(ext, "mkv")
+	||	streq(ext, "mov"))
+	{
 		Mat frame = {};
 		uint8_t *data = load_first_frame(file_path, &frame);
 
@@ -768,7 +753,9 @@ static bool load_preview(const char *ext, const char *file_path, Image *img)
 
 		frame.release();
 		return true;
-	} else if (strcmp(ext, "png") == 0) {
+	} else if (streq(ext, "png")
+				 ||	 streq(ext, "jpg"))
+	{
 		*img = LoadImage(file_path);
 		return true;
 	}
@@ -879,7 +866,7 @@ static void load_previews(void)
 				idle_flag = true;
 			}
 
-			const path_ino_t path_ino = paths[i];
+			const path_t path_ino = paths[i];
 
 			int idx = hmgeti(img_map, path_ino.ino);
 
@@ -941,6 +928,13 @@ static void load_previews(void)
 	}
 }
 
+INLINE static uint8_t is_dir(const char *file_path)
+{
+	struct stat info = {0};
+	stat(file_path, &info);
+	return S_ISDIR(info.st_mode);
+}
+
 int main(const int argc, char *argv[])
 {
 	SetTargetFPS(60);
@@ -949,9 +943,7 @@ int main(const int argc, char *argv[])
 
 	font = LoadFontEx(FONT_PATH, font_size, NULL, 0);
 
-	if (argc > 1
-	&&	get_file_type(argv[1]) == FILE_DIRECTORY)
-	{
+	if (argc > 1 &&	is_dir(argv[1])) {
 		curr_dir = argv[1];
 	}
 
