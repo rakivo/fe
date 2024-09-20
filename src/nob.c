@@ -1,4 +1,5 @@
-// A small subset of <https://github.com/tsoding/musializer/blob/master/nob.h>, just to run commands.
+// ATTENTION !
+// This is a small subset of <https://github.com/tsoding/musializer/blob/master/nob.h>, just to run commands.
 
 #define _POSIX_C_SOURCE 200112L
 

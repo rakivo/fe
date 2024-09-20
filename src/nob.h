@@ -1,3 +1,6 @@
+// ATTENTION !
+// This is a small subset of <https://github.com/tsoding/musializer/blob/master/nob.h>, just to run commands.
+
 #include <assert.h>
 #include <stdlib.h>
 #include <stdbool.h>

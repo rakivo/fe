@@ -65,11 +65,11 @@ using namespace TagLib;
 #define SCROLL_SPEED_BOOST_FACTOR 2.5f
 #define BOOSTED_SCROLL_SPEED (DEFAULT_SCROLL_SPEED * SCROLL_SPEED_BOOST_FACTOR)
 
-static int tile_width     = DEFAULT_TILE_WIDTH;
-static int tile_height    = DEFAULT_TILE_HEIGHT;
-static int tile_spacing   = DEFAULT_TILE_SPACING;
-static int text_padding   = DEFAULT_TEXT_PADDING;
-static int font_size      = DEFAULT_FONT_SIZE;
+static int tile_width			= DEFAULT_TILE_WIDTH;
+static int tile_height		= DEFAULT_TILE_HEIGHT;
+static int tile_spacing		= DEFAULT_TILE_SPACING;
+static int text_padding		= DEFAULT_TEXT_PADDING;
+static int font_size			= DEFAULT_FONT_SIZE;
 static float text_spacing = DEFAULT_TEXT_SPACING;
 static float scroll_speed = DEFAULT_SCROLL_SPEED;
 
@@ -91,7 +91,11 @@ static Font font = {0};
 static Vector2 last_click_pos = {0};
 static double last_click_time = 0.0;
 
+#define DOUBLE_DOT_THRESHOLD 0.3f
+static double last_dot_time = 0.0;
+
 typedef struct {int x, y;} Vector2i;
+
 static float last_scroll_offset_y = 0.0;
 static Vector2i selected_tile_pos = {0};
 static Vector2i selected_tile_pos_before_entering_dir = {0};
@@ -176,7 +180,7 @@ static bool new_scale_flag = false;
 static void resize_img(Image *image, int tw, int th);
 static bool load_preview(const char *ext, const char *file_path, Image *img);
 
-INLINE int pixel_format_to_amount_of_bytes(int pixel_format)
+INLINE static int pixel_format_to_amount_of_bytes(int pixel_format)
 {
 	switch (pixel_format) {
 	case PIXELFORMAT_UNCOMPRESSED_R8G8B8:	return 3;
@@ -184,7 +188,7 @@ INLINE int pixel_format_to_amount_of_bytes(int pixel_format)
 	}
 }
 
-INLINE void *copy_img_data(const Image *img)
+INLINE static void *copy_img_data(const Image *img)
 {
 	const size_t data_size = img->width *
 													 img->height *
@@ -344,9 +348,10 @@ INLINE static void enter_dir(char *dir, size_t tile_idx)
 	preserve_tile_pos(tile_idx);
 }
 
-static INLINE void stop_search_mode(void)
+INLINE static void stop_search_mode(void)
 {
 	search_mode = false;
+	typing_search = false;
 	matched_idxs.clear();
 	memset(search_string, 0, search_string_size);
 	search_string_size = 0;
@@ -360,7 +365,30 @@ static void handle_keyboard_input(void)
 
 	int key = GetKeyPressed();
 	if (search_mode) {
+		const int w = GetScreenWidth();
+		const int h = GetScreenHeight();
+		const int rh = SEARCH_TEXT_HEIGHT + SEARCH_TEXT_SPACING * 2;
+		const Vector2 text_pos = (Vector2) {
+			SEARCH_TEXT_SPACING,
+			h - SEARCH_TEXT_HEIGHT
+		};
+
+		DrawRectangle(0, h - rh, w, rh, SEARCH_WINDOW_BACKGROUND_COLOR);
+
 		if (typing_search) goto draw_search;
+
+		scratch_buffer_clear();
+
+		scratch_buffer_printf("%d/%d match",
+													last_matched_idx,
+													matched_idxs.size());
+
+		DrawTextEx(font,
+							 scratch_buffer_to_string(),
+							 text_pos,
+							 font_size,
+							 text_spacing,
+							 RAYWHITE);
 
 		if (key == KEY_ESCAPE || key == KEY_ENTER) {
 			stop_search_mode();
@@ -393,19 +421,15 @@ static void handle_keyboard_input(void)
 
 draw_search:
 
-		const int w = GetScreenWidth();
-		const int h = GetScreenHeight();
-		const int rh = SEARCH_TEXT_HEIGHT + SEARCH_TEXT_SPACING * 2;
-
-		DrawRectangle(0, h - rh, w, rh, SEARCH_WINDOW_BACKGROUND_COLOR);
+		if (key == KEY_ESCAPE) {
+			stop_search_mode();
+			return;
+		}
 
 		if (search_string_size > 0) {
 			DrawTextEx(font,
 								 search_string,
-								 (Vector2) {
-									 SEARCH_TEXT_SPACING,
-									 h - SEARCH_TEXT_HEIGHT
-								 },
+								 text_pos,
 								 font_size,
 								 text_spacing,
 								 RAYWHITE);
@@ -430,6 +454,10 @@ draw_search:
 					}
 					matched_idxs.emplace_back(i);
 				}
+			}
+
+			if (matched_idxs.size() == 1) {
+				stop_search_mode();
 			}
 
 			memset(search_string, 0, search_string_size);
@@ -503,6 +531,22 @@ draw_search:
 
 		default: break;
 		}
+	} break;
+
+	case KEY_PERIOD: {
+		const double dot_time = GetTime();
+		if ((dot_time - last_dot_time) <= DOUBLE_DOT_THRESHOLD) {
+			size_t idx = selected_tile_pos.x +
+									 selected_tile_pos.y *
+									 tpr;
+
+			enter_dir(join_dir(".."), idx);
+			last_dot_time = 0.0;
+		} else {
+			last_dot_time = dot_time;
+		}
+
+		return;
 	} break;
 
 	case KEY_W: case KEY_UP:
@@ -589,6 +633,7 @@ static void handle_mouse_input(void)
 			switch (paths[i].type) {
 			case DT_DIR: {
 				enter_dir(tmp, i);
+				last_click_time = 0.0;
 			} break;
 
 			case DT_REG: {
@@ -991,7 +1036,7 @@ static void render_files(void)
 	}
 }
 
-static Image scale_img(const Image *src_img)
+INLINE static Image scale_img(const Image *src_img)
 {
 	Image scaled_img = *src_img;
 	scaled_img.data = copy_img_data(src_img);
@@ -1148,7 +1193,5 @@ int main(const int argc, char *argv[])
 }
 
 /* TODO:
-	2. Implement search
 	3. Implement auto-completion in the search mode
-	4. Fix resize of images
 */
