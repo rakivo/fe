@@ -117,8 +117,11 @@ static Image placeholder_scaled = {0};
 static Texture2D placeholder_texture = {0};
 static bool placeholder_resized = false;
 
+typedef struct path_t path_t;
+
 static std::vector<Nob_Proc> procs = {};
 static std::vector<Texture2D> to_unload = {};
+static std::vector<path_t> to_load = {};
 
 static size_t last_matched_idx = 1;
 static std::vector<size_t> matched_idxs = {};
@@ -161,11 +164,12 @@ typedef struct {
 
 static img_map_t *img_map = NULL;
 
-typedef struct {
+struct path_t {
+	bool abs;
 	char *str;
 	size_t ino;
 	uint8_t type;
-} path_t;
+};
 
 std::vector<path_t> paths = {};
 
@@ -176,9 +180,6 @@ std::vector<path_t> paths = {};
 static bool stop_flag = false;
 static bool idle_flag = false;
 static bool new_scale_flag = false;
-
-static void resize_img(Image *image, int tw, int th);
-static bool load_preview(const char *ext, const char *file_path, Image *img);
 
 INLINE static int pixel_format_to_amount_of_bytes(int pixel_format)
 {
@@ -253,7 +254,7 @@ static void read_dir(void)
 			char *file_path = str_copy(e->d_name, strlen(e->d_name));
 			size_t ino = (size_t) e->d_ino;
 			uint8_t type = (uint8_t) e->d_type;
-			paths.emplace_back((path_t) {file_path, ino, type});
+			paths.emplace_back((path_t) {false, file_path, ino, type});
 		}
 		e = readdir(dir);
 	}
@@ -321,6 +322,16 @@ INLINE static Vector2 get_tile_pos(size_t tile_pos_x, size_t tile_pos_y)
 		tile_pos_x * (tile_width + tile_spacing) + tile_spacing,
 		tile_pos_y * (tile_height + tile_spacing) + tile_spacing - scroll_offset_y
 	};
+}
+
+INLINE static char *get_top_file_path(char *src)
+{
+	for (int i = strlen(src) - 1; i >= 0; i--) {
+		if (src[i] == '/') {
+			return src + i + 1;
+		}
+	}
+	return NULL;
 }
 
 INLINE static char *get_extension(char *src)
@@ -898,7 +909,7 @@ uint8_t *try_get_album_cover(const char *file_path, size_t *data_size)
 	return data;
 }
 
-static bool load_preview(const char *ext, const char *file_path, Image *img)
+static bool get_preview(const char *ext, const char *file_path, Image *img)
 {
 	if (is_video(ext)) {
 		Mat frame = {};
@@ -1036,12 +1047,143 @@ static void render_files(void)
 	}
 }
 
-INLINE static Image scale_img(const Image *src_img)
+INLINE static Image scale_img(Image src_img)
 {
-	Image scaled_img = *src_img;
-	scaled_img.data = copy_img_data(src_img);
+	Image scaled_img = src_img;
+	scaled_img.data = copy_img_data(&src_img);
 	resize_img_to_size_of_tile(&scaled_img);
 	return scaled_img;
+}
+
+static void handle_dropped_files(void)
+{
+	if (!IsFileDropped()) return;
+
+	FilePathList files = LoadDroppedFiles();
+
+	for (size_t i = 0; i < files.count; i++) {
+		struct stat info = {0};
+		stat(files.paths[i], &info);
+
+		char *top_level_file_path = get_top_file_path(files.paths[i]);
+
+		scratch_buffer_clear();
+		scratch_buffer_append(top_level_file_path);
+		char *top_level_file_path_copy = scratch_buffer_copy();
+
+		Nob_Cmd cmd = {0};
+		nob_cmd_append(&cmd, "cp", files.paths[i], top_level_file_path);
+
+		uint8_t type = 0;
+		if (S_ISDIR(info.st_mode)) {
+			type = DT_DIR;
+			nob_cmd_append(&cmd, "-r");
+		} else if (S_ISREG(info.st_mode)) {
+			type = DT_REG;
+		} else {
+			eprintf("naah bruh");
+			continue;
+		}
+
+		Nob_Proc proc = nob_cmd_run_async(cmd, true);
+		procs.emplace_back(proc);
+
+		path_t path = {
+			.abs = true,
+			.ino = (size_t) info.st_ino,
+			.str = top_level_file_path_copy,
+			.type = type,
+		};
+
+		paths.emplace_back(path);
+
+		scratch_buffer_clear();
+		scratch_buffer_append(files.paths[i]);
+
+		path.str = scratch_buffer_copy();
+
+		to_load.emplace_back(path);
+		idle_flag = false;
+
+		img_value_t value = {
+			.src_img = placeholder_src,
+			.scaled_img = scale_img(placeholder_scaled),
+			.is_placeholder = true,
+			.loaded_texture = std::nullopt,
+		};
+
+		hmput(img_map, path.ino, value);
+	}
+
+	UnloadDroppedFiles(files);
+}
+
+static void load_preview(size_t i, path_t path_ino, size_t size)
+{
+	bool prev_scale_flag = new_scale_flag;
+	if (i == size - 1) {
+		if (new_scale_flag) new_scale_flag = false;
+		idle_flag = true;
+	}
+
+	int idx = hmgeti(img_map, path_ino.ino);
+
+	if (prev_scale_flag) {
+		img_map_t *p = hmgetp(img_map, path_ino.ino);
+
+		if (img_map[idx].value.is_placeholder) {
+			UnloadImage(placeholder_scaled);
+			to_unload.emplace_back(placeholder_texture);
+
+			placeholder_scaled = scale_img(placeholder_src);
+			placeholder_resized = true;
+			return;
+		}
+
+		if (p->value.scaled_img.data != NULL) {
+			UnloadImage(p->value.scaled_img);
+		}
+
+		p->value.scaled_img = scale_img(p->value.src_img);
+
+		if (p->value.loaded_texture) {
+			to_unload.emplace_back(*p->value.loaded_texture);
+		}
+
+		p->value.loaded_texture = std::nullopt;
+		return;
+	} else if (!img_map[idx].value.is_placeholder) return;
+
+	scratch_buffer_clear();
+	if (!path_ino.abs) {
+		scratch_buffer_append(curr_dir);
+		scratch_buffer_append_char('/');
+	}
+
+	scratch_buffer_append(path_ino.str);
+
+	char *file_path = scratch_buffer_to_string();
+	char *ext = get_extension(path_ino.str);
+
+	if (ext == NULL || *ext == '\0') return;
+
+	Image src_img = {0};
+	if (!get_preview(ext, file_path, &src_img)) return;
+
+	Image scaled_img = src_img;
+	scaled_img.data = copy_img_data(&src_img);
+
+	resize_img_to_size_of_tile(&scaled_img);
+
+	img_value_t value = {
+		.src_img = src_img,
+		.scaled_img = scaled_img,
+		.is_placeholder = false,
+		.loaded_texture = std::nullopt,
+	};
+
+	hmput(img_map, path_ino.ino, value);
+	return;
 }
 
 static void load_previews(void)
@@ -1049,71 +1191,15 @@ static void load_previews(void)
 	while (!stop_flag) {
 		if (idle_flag) continue;
 
+		for (int i = to_load.size() - 1; i >= 0; --i) {
+			if (idle_flag) break;
+			load_preview(i, to_load[i], to_load.size());
+			to_load.pop_back();
+		}
+
 		for (size_t i = 0; i < paths.size(); ++i) {
 			if (idle_flag) break;
-
-			bool prev_scale_flag = new_scale_flag;
-			if (i == paths.size() - 1) {
-				if (new_scale_flag) new_scale_flag = false;
-				idle_flag = true;
-			}
-
-			const path_t path_ino = paths[i];
-
-			int idx = hmgeti(img_map, path_ino.ino);
-
-			if (prev_scale_flag) {
-				img_map_t *p = hmgetp(img_map, path_ino.ino);
-
-				if (img_map[idx].value.is_placeholder) {
-					UnloadImage(placeholder_scaled);
-					to_unload.emplace_back(placeholder_texture);
-
-					placeholder_scaled = scale_img(&placeholder_src);
-					placeholder_resized = true;
-					continue;
-				}
-
-				if (p->value.scaled_img.data != NULL) {
-					UnloadImage(p->value.scaled_img);
-				}
-
-				p->value.scaled_img =	scale_img(&p->value.src_img);
-
-				if (p->value.loaded_texture) {
-					to_unload.emplace_back(*p->value.loaded_texture);
-				}
-
-				p->value.loaded_texture = std::nullopt;
-				continue;
-			} else if (!img_map[idx].value.is_placeholder) continue;
-
-			scratch_buffer_clear();
-			scratch_buffer_append(curr_dir);
-			scratch_buffer_append_char('/');
-			scratch_buffer_append(path_ino.str);
-
-			char *file_path = scratch_buffer_to_string();
-			char *ext = get_extension(path_ino.str);
-
-			if (ext == NULL || *ext == '\0') continue;
-
-			Image src_img = {0};
-			if (!load_preview(ext, file_path, &src_img)) continue;
-
-			Image scaled_img = src_img;
-			scaled_img.data = copy_img_data(&src_img);
-
-			resize_img_to_size_of_tile(&scaled_img);
-
-			img_value_t value = {
-				.src_img = src_img,
-				.scaled_img = scaled_img,
-				.is_placeholder = false,
-				.loaded_texture = std::nullopt,
-			};
-
-			hmput(img_map, path_ino.ino, value);
+			load_preview(i, paths[i], paths.size());
 		}
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(PREVIEW_LOADER_SLEEP_TIME));
@@ -1152,6 +1238,7 @@ int main(const int argc, char *argv[])
 	std::thread preview_loader = std::thread(load_previews);
 
 	while (!WindowShouldClose()) {
+		handle_dropped_files();
 		BeginDrawing();
 			ClearBackground(BACKGROUND_COLOR);
 			render_files();
@@ -1194,4 +1281,5 @@ int main(const int argc, char *argv[])
 
 /* TODO:
 	3. Implement auto-completion in the search mode
+	12. Fix resize of placeholders of drag & dropped files
 */
