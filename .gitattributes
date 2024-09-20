@@ -1,1 +1,2 @@
-src/stb_*.h linguist-language=C
+src/stb_ds.h linguist-language=C
+src/stb_image.h linguist-language=C
