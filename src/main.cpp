@@ -1421,6 +1421,7 @@ static bool get_preview(char *file_path, Image *img)
 		int format = comp_to_pixel_format(comp);
 		if (format == -1) {
 			free(img->data);
+			fclose(stream);
 			return false;
 		}
 
