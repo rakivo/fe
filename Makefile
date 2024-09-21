@@ -16,7 +16,7 @@ CXXWFLAGS := -Wno-deprecated-dynamic-exception-spec -Wno-deprecated-dynamic-exce
 CLIBS := -lraylib -lopencv_core -lopencv_videoio -lopencv_imgcodecs -lopencv_imgproc -ltag
 INCLUDE_FLAGS := -I/usr/include/opencv4
 
-all: $(BUILD_DIR)/$(BIN_FILE)
+all: $(BUILD_DIR) $(BUILD_DIR)/$(BIN_FILE)
 
 $(BUILD_DIR):
 	mkdir -p $@
