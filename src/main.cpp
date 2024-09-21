@@ -10,6 +10,7 @@
 #include <chrono>
 #include <vector>
 #include <thread>
+#include <fstream>
 #include <optional>
 
 #define SCRATCH_BUFFER_IMPLEMENTATION
@@ -31,14 +32,18 @@
 
 using namespace cv;
 
-#include "taglib/mpegfile.h"
-#include "taglib/id3v2tag.h"
-#include "taglib/attachedpictureframe.h"
+#include <taglib/fileref.h>
+#include <taglib/mpegfile.h>
+#include <taglib/id3v2tag.h>
+#include <taglib/attachedpictureframe.h>
 
 using namespace TagLib;
 
 #define streq(s1, s2) (strcmp(s1, s2) == 0)
 #define eprintf(...) fprintf(stderr, __VA_ARGS__)
+
+#define MP4_MAGIC_BYTES "\x66\x74\x79\x70"
+#define PNG_MAGIC_BYTES "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A"
 
 #define TILE_COLOR DARKGRAY
 #define BACKGROUND_COLOR ((Color) {24, 24, 24, 255})
@@ -187,7 +192,7 @@ static std::vector<size_t> matched_idxs = {};
 	const size_t what##_SIZE = sizeof(what) / sizeof(*what)
 
 #define DEFINE_IS(what, array) \
-	INLINE static bool is_##what(const char *ext) \
+	INLINE static bool _is_##what(const char *ext) \
 	{ \
 		for (size_t i = 0; i < array##_SIZE; ++i) { \
 			if (streq(ext, array[i])) return true; \
@@ -429,7 +434,7 @@ INLINE static char *get_top_file_path(char *src)
 			return src + i + 1;
 		}
 	}
-	return NULL;
+	return src;
 }
 
 INLINE static char *get_extension(char *src)
@@ -644,7 +649,7 @@ static void handle_keyboard_input(void)
 				return;
 			}
 
-			scratch_buffer_append_full_file_path(paths[delete_tile_idx].str);
+			scratch_buffer_append_full_file_path(get_top_file_path(paths[delete_tile_idx].str));
 
 			errno = 0;
 			char *file_path = scratch_buffer_to_string();
@@ -1254,15 +1259,60 @@ INLINE static void resize_img_to_size_of_tile(Image *img)
 	resize_img(img, tile_width	 - text_padding, tile_height - text_padding);
 }
 
-static void handle_enter(char *file_path)
+INLINE static bool is_png_file(const char *file_path)
+{
+	std::ifstream file(file_path, std::ios::binary);
+	if (!file.is_open()) return false;
+	char buf[8] = {0};
+	file.read(buf, 8);
+	return file.gcount() == 8 && memcmp(buf, PNG_MAGIC_BYTES, 8) == 0;
+}
+
+INLINE static bool is_mp3_file(const char *file_path)
+{
+	TagLib::FileRef file = TagLib::FileRef(file_path);
+	if (file.isNull()) return false;
+	TagLib::AudioProperties *props = file.audioProperties();
+	return props != NULL && props->bitrate() > 0 && props->sampleRate() > 0 && props->channels() > 0;
+}
+
+INLINE static bool is_mp4_file(const char *file_path)
+{
+	std::ifstream file(file_path, std::ios::binary);
+	if (!file.is_open()) return false;
+	char buf[8] = {0};
+	file.read(buf, 8);
+	return file.gcount() == 8 && memcmp(buf + 4, MP4_MAGIC_BYTES, 4) == 0;
+}
+
+INLINE static bool is_image(char *file_path)
 {
 	char *ext = get_extension(file_path);
-	if (is_video(ext) || is_music(ext)) {
+	return _is_image(ext) || is_png_file(file_path);
+}
+
+INLINE static bool is_music(char *file_path)
+{
+	char *ext = get_extension(file_path);
+	return _is_music(ext) || is_mp3_file(file_path);
+}
+
+INLINE static bool is_video(char *file_path)
+{
+	char *ext = get_extension(file_path);
+	return _is_video(ext) || is_mp4_file(file_path);
+}
+
+static void handle_enter(char *file_path_)
+{
+	scratch_buffer_append_full_file_path(get_top_file_path(file_path_));
+	char *file_path = scratch_buffer_to_string();
+	if (is_video(file_path) || is_music(file_path)) {
 		Nob_Cmd cmd = {0};
 		nob_cmd_append(&cmd, "mpv", file_path);
 		const Nob_Proc proc = nob_cmd_run_async(cmd, true);
 		procs.emplace_back(proc);
-	} else if (is_image(ext)) {
+	} else if (is_image(file_path)) {
 		Nob_Cmd cmd = {0};
 		nob_cmd_append(&cmd, "mpv", "--loop", file_path);
 		const Nob_Proc proc = nob_cmd_run_async(cmd, true);
@@ -1294,9 +1344,21 @@ static uint8_t *try_get_album_cover(const char *file_path, size_t *data_size)
 	return data;
 }
 
-static bool get_preview(const char *ext, const char *file_path, Image *img)
+static int comp_to_pixel_format(int comp)
 {
-	if (is_video(ext)) {
+	switch (comp) {
+	case 1:	 return PIXELFORMAT_UNCOMPRESSED_GRAYSCALE;
+	case 2:	 return PIXELFORMAT_UNCOMPRESSED_GRAY_ALPHA;
+	case 3:	 return PIXELFORMAT_UNCOMPRESSED_R8G8B8;
+	case 4:	 return PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+	default: return -1;
+	}
+	__builtin_unreachable();
+}
+
+static bool get_preview(char *file_path, Image *img)
+{
+	if (is_video(file_path)) {
 		Mat frame = {};
 		uint8_t *data = load_first_frame(file_path, &frame);
 
@@ -1308,32 +1370,64 @@ static bool get_preview(const char *ext, const char *file_path, Image *img)
 
 		frame.release();
 		return true;
-	} else if (is_music(ext)) {
+	} else if (is_music(file_path)) {
 		size_t data_size = 0;
 		uint8_t *data = try_get_album_cover(file_path, &data_size);
 
 		if (data == NULL || data_size == 0) return false;
 
 		int comp = 0;
-		img->data = stbi_load_from_memory(data, data_size, &img->width, &img->height, &comp, 0);
+		img->data = stbi_load_from_memory(data,
+																			data_size,
+																			&img->width,
+																			&img->height,
+																			&comp,
+																			0);
+
 		if (img->data == NULL) {
 			free(data);
 			return false;
 		}
 
-		if			(comp == 1)	img->format = PIXELFORMAT_UNCOMPRESSED_GRAYSCALE;
-		else if (comp == 2)	img->format = PIXELFORMAT_UNCOMPRESSED_GRAY_ALPHA;
-		else if (comp == 3)	img->format = PIXELFORMAT_UNCOMPRESSED_R8G8B8;
-		else if (comp == 4)	img->format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
-		else {
-			free(data);
+		int format = comp_to_pixel_format(comp);
+		if (format == -1) {
+			free(img->data);
 			return false;
 		}
 
+		img->format = format;
 		img->mipmaps = 1;
 		return true;
-	} else if (is_image(ext)) {
-		*img = LoadImage(file_path);
+	} else if (is_image(file_path)) {
+		FILE *stream = fopen(file_path, "rb");
+		if (!stream) {
+			eprintf("failed to open %s\n", file_path);
+			return false;
+		}
+
+		int comp = 0;
+		img->data = stbi_load_from_file(stream,
+																		&img->width,
+																		&img->height,
+																		&comp,
+																		0);
+
+		if (img->data == NULL) {
+			eprintf("failed to load image from %s\n", file_path);
+			fclose(stream);
+			return false;
+		}
+
+		int format = comp_to_pixel_format(comp);
+		if (format == -1) {
+			free(img->data);
+			return false;
+		}
+
+		img->format = format;
+		img->mipmaps = 1;
+
+		fclose(stream);
 		return true;
 	}
 
@@ -1530,12 +1624,9 @@ static void load_preview(size_t i, path_t path_ino, size_t size)
 	scratch_buffer_append(path_ino.str);
 
 	char *file_path = scratch_buffer_to_string();
-	char *ext = get_extension(path_ino.str);
-
-	if (ext == NULL || *ext == '\0') return;
 
 	Image src_img = {0};
-	if (!get_preview(ext, file_path, &src_img)) return;
+	if (!get_preview(file_path, &src_img)) return;
 
 	Image scaled_img = src_img;
 	scaled_img.data = copy_img_data(&src_img);
@@ -1603,7 +1694,9 @@ static void fill_img_map(void)
 			continue;
 		}
 
-		if (is_music(ext)) {
+		scratch_buffer_append_full_file_path(get_top_file_path(path.str));
+
+		if (is_music(scratch_buffer_to_string())) {
 			hmput(img_map, path.ino, music_img);
 		}	else if (path.type == DT_DIR) {
 			hmput(img_map, path.ino, dir_img);
