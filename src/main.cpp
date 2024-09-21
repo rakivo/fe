@@ -51,8 +51,8 @@ using namespace TagLib;
 #define DELETE_ASK_WINDOW_PADDING_FACTOR 0.00003667
 
 #define DELETE_ASK_WINDOW_TEXT_PADDING (\
-	DELETE_ASK_WINDOW_PADDING_FACTOR * \
-	((GetScreenHeight() / 1.2) * GetScreenWidth()) \
+	DELETE_ASK_WINDOW_PADDING_FACTOR *\
+	((GetScreenHeight() / 1.2)*GetScreenWidth()) \
 )
 
 #define RENAME_ASK_WINDOW_TEXT_PADDING DELETE_ASK_WINDOW_TEXT_PADDING
@@ -76,9 +76,14 @@ using namespace TagLib;
 #define SEARCH_TEXT_HEIGHT 25
 #define SEARCH_TEXT_SPACING 3.0f
 
+#define RENAME_TEXT_HEIGHT SEARCH_TEXT_HEIGHT
+#define RENAME_TEXT_SPACING SEARCH_TEXT_SPACING
+
+#define DEFAULT_BOT_WINDOW_BACKGROUND_COLOR SEARCH_WINDOW_BACKGROUND_COLOR
+
 #define DEFAULT_SCROLL_SPEED 50.0f
 #define SCROLL_SPEED_BOOST_FACTOR 2.5f
-#define BOOSTED_SCROLL_SPEED (DEFAULT_SCROLL_SPEED * SCROLL_SPEED_BOOST_FACTOR)
+#define BOOSTED_SCROLL_SPEED (DEFAULT_SCROLL_SPEED*SCROLL_SPEED_BOOST_FACTOR)
 
 static int tile_width			= DEFAULT_TILE_WIDTH;
 static int tile_height		= DEFAULT_TILE_HEIGHT;
@@ -91,6 +96,8 @@ static float scroll_speed = DEFAULT_SCROLL_SPEED;
 #define tile_full_height (tile_height + tile_spacing)
 
 static bool delete_mode = false;
+static bool delete_failed = false;
+static char *delete_fail = NULL;
 static bool delete_sure = false;
 static size_t delete_ino = -1;
 static int delete_tile_idx = -1;
@@ -145,6 +152,17 @@ static float scale = DEFAULT_SCALE;
 	__VA_ARGS__##placeholder_texture = LoadTextureFromImage(__VA_ARGS__##placeholder_scaled); \
 	__VA_ARGS__##placeholder_resized = false; \
 } while (0)
+
+#define LOAD_PLACEHOLDER(...) \
+	Image __VA_ARGS__##scaled_img = __VA_ARGS__##placeholder_src; \
+	__VA_ARGS__##scaled_img.data = copy_img_data(&__VA_ARGS__##placeholder_src); \
+	resize_img_to_size_of_tile(&__VA_ARGS__##scaled_img); \
+	img_value_t __VA_ARGS__##img = { \
+		.src_img = __VA_ARGS__##placeholder_src, \
+		.scaled_img = __VA_ARGS__##scaled_img, \
+		.is_placeholder = true, \
+		.loaded_texture = LoadTextureFromImage(__VA_ARGS__##scaled_img) \
+	};
 
 #define DEFINE_PLACEHOLDER(...) \
 	static Image __VA_ARGS__##placeholder_src = {0}; \
@@ -210,7 +228,7 @@ struct path_t {
 	bool abs, deleted;
 };
 
-std::vector<path_t> paths = {};
+static std::vector<path_t> paths = {};
 
 // in millis
 #define PREVIEW_LOADER_SLEEP_TIME 256
@@ -240,27 +258,61 @@ INLINE static void *copy_img_data(const Image *img)
 	return data;
 }
 
-INLINE static void update_selected_tile_if_its_not_visible(void)
+INLINE static void update_offset_if_tile_is_not_visible(Vector2i tile_pos)
 {
-	const int tile_row = selected_tile_pos.y;
+	const int tile_row = tile_pos.y;
 	const int visible_rows = GetScreenHeight() / (tile_height + tile_spacing);
 	const int first_visible_row = scroll_offset_y / (tile_height + tile_spacing);
 	const int last_visible_row = first_visible_row + visible_rows - 1;
 
 	if (tile_row < first_visible_row || tile_row > last_visible_row) {
-		scroll_offset_y = tile_row * (tile_height + tile_spacing);
+		scroll_offset_y = tile_row*(tile_height + tile_spacing);
 	}
+}
+
+INLINE static int get_tiles_per_row(void);
+INLINE static Vector2i idx_to_tile_pos(size_t idx);
+
+INLINE static Vector2i get_tile_pos_from_ino(size_t ino)
+{
+	const int tpr = get_tiles_per_row();
+	for (size_t i = 0; i < paths.size(); ++i) {
+		if (paths[i].deleted || paths[i].ino != ino) continue;
+		const int tile_pos_x = i % tpr;
+		const int tile_pos_y = i / tpr;
+		return (Vector2i) {tile_pos_x, tile_pos_y};
+	}
+	__builtin_unreachable();
+}
+
+static void update_tile_pos(void)
+{
+	Vector2i tile_pos = {0};
+	if (delete_sure) {
+		const Vector2i new_tile_pos = get_tile_pos_from_ino(delete_ino);
+		tile_pos.x = new_tile_pos.x;
+		tile_pos.y = new_tile_pos.y;
+	} else if (rename_sure) {
+		const Vector2i new_tile_pos = get_tile_pos_from_ino(rename_ino);
+		tile_pos.x = new_tile_pos.x;
+		tile_pos.y = new_tile_pos.y;
+	} else {
+		tile_pos.x = selected_tile_pos.x;
+		tile_pos.y = selected_tile_pos.y;
+	}
+
+	update_offset_if_tile_is_not_visible(tile_pos);
 }
 
 static void set_new_scale(float new_scale)
 {
 	scale				 = new_scale;
-	tile_width	 = DEFAULT_TILE_WIDTH   * scale;
-	tile_height	 = DEFAULT_TILE_HEIGHT  * scale;
-	tile_spacing = DEFAULT_TILE_SPACING * scale;
-	text_padding = DEFAULT_TEXT_PADDING * scale;
-	font_size		 = DEFAULT_FONT_SIZE    * scale;
-	text_spacing = DEFAULT_TEXT_SPACING * scale;
+	tile_width	 = DEFAULT_TILE_WIDTH  *scale;
+	tile_height	 = DEFAULT_TILE_HEIGHT *scale;
+	tile_spacing = DEFAULT_TILE_SPACING*scale;
+	text_padding = DEFAULT_TEXT_PADDING*scale;
+	font_size		 = DEFAULT_FONT_SIZE   *scale;
+	text_spacing = DEFAULT_TEXT_SPACING*scale;
 
 	UnloadFont(font);
 	font = LoadFontEx(FONT_PATH, font_size, NULL, 0);
@@ -276,7 +328,7 @@ static void set_new_scale(float new_scale)
 		RELOAD_PLACEHOLDER(music_);
 	}
 
-	update_selected_tile_if_its_not_visible();
+	update_tile_pos();
 }
 
 static void read_dir(void)
@@ -353,20 +405,20 @@ INLINE static void preserve_tile_pos(size_t tile_idx)
 	}
 }
 
-INLINE static Vector2 path_idx_to_tile_pos(size_t path_idx)
+INLINE static Vector2i idx_to_tile_pos(size_t idx)
 {
 	const size_t tpr = get_tiles_per_row();
-	return (Vector2) {
-		.x = path_idx % tpr,
-		.y = path_idx / tpr
+	return (Vector2i) {
+		.x = idx % tpr,
+		.y = idx / tpr
 	};
 }
 
 INLINE static Vector2 get_tile_pos(size_t tile_pos_x, size_t tile_pos_y)
 {
 	return (Vector2) {
-		tile_pos_x * (tile_width + tile_spacing) + tile_spacing,
-		tile_pos_y * (tile_height + tile_spacing) + tile_spacing - scroll_offset_y
+		tile_pos_x*(tile_width + tile_spacing) + tile_spacing,
+		tile_pos_y*(tile_height + tile_spacing) + tile_spacing - scroll_offset_y
 	};
 }
 
@@ -428,9 +480,12 @@ INLINE static void stop_search_mode(void)
 
 INLINE static void stop_delete_mode(void)
 {
-	delete_tile_idx = -1;
 	delete_mode = false;
+	delete_failed = false;
+	delete_fail = NULL;
 	delete_sure = false;
+	delete_ino = -1;
+	delete_tile_idx = -1;
 }
 
 INLINE static void str_tolower(char *str)
@@ -440,7 +495,7 @@ INLINE static void str_tolower(char *str)
 
 INLINE static size_t get_tile_idx_from_tile_pos(Vector2i pos)
 {
-	return pos.x + pos.y * get_tiles_per_row();
+	return pos.x + pos.y*get_tiles_per_row();
 }
 
 INLINE static void draw_text_boxed(Font font,
@@ -472,7 +527,7 @@ static void draw_ask_window(Color bg, Color tc, int pad, char *text)
 		ry + (rh - ts.y) / 2
 	};
 
-	if (ts.x < rw - 2 * pad) {
+	if (ts.x < rw - 2*pad) {
 		draw_text_truncated(text, tp, rw, tc);
 	} else {
 		draw_text_boxed(font, text,
@@ -485,38 +540,55 @@ static void draw_ask_window(Color bg, Color tc, int pad, char *text)
 	}
 }
 
-static int rm_file_callback(const char *file_path,
-														const struct stat *,
-														int ,
-														struct FTW *)
+INLINE static int rm_file_callback(const char *file_path,
+																	 const struct stat *,
+																	 int,
+																	 struct FTW *)
 {
 	if (remove(file_path) < 0) {
-		perror("ERROR: remove");
+		perror("remove");
 		return -1;
 	}
 	return 0;
 }
 
-static void draw_bot_window(void)
+INLINE static void draw_bot_window(Color bg, int th, int ts)
 {
-	const int w = GetScreenWidth();
-	const int h = GetScreenHeight();
-
-	const int rh = SEARCH_TEXT_HEIGHT + SEARCH_TEXT_SPACING * 2;
-	const int rx = 0;
-	const int ry = h - rh;
-	const int rw = w;
-	const Color rc = SEARCH_WINDOW_BACKGROUND_COLOR;
-
+	const int		w = GetScreenWidth();
+	const int		h = GetScreenHeight();
+	const int		rw = w;
+	const int		rh = th + ts*2;
+	const int		rx = 0;
+	const int		ry = h - rh;
+	const Color rc = bg;
 	DrawRectangle(rx, ry, rw, rh, rc);
 }
 
-static Vector2 get_text_pos_to_draw_into_bot_window(int ts, int th)
+INLINE static Vector2 get_text_pos_to_draw_into_bot_window(int ts, int th)
 {
 	return (Vector2) {ts, GetScreenHeight() - th};
 }
 
 static void handle_enter(char *file_path);
+
+INLINE static char *scratch_buffer_append_full_file_path(char *file_path)
+{
+	scratch_buffer_clear();
+	scratch_buffer_append(curr_dir);
+	scratch_buffer_append_char('/');
+	scratch_buffer_append(file_path);
+	return scratch_buffer.str;
+}
+
+INLINE static void check_for_updated_tile_idx(int *tile_idx, size_t *ino)
+{
+	int new_idx = (int) get_tile_idx_from_tile_pos(selected_tile_pos);
+	size_t new_ino = paths[new_idx].ino;
+	if (*tile_idx == -1) {
+		*ino = new_ino;
+		*tile_idx = new_idx;
+	}
+}
 
 static void handle_keyboard_input(void)
 {
@@ -530,36 +602,18 @@ static void handle_keyboard_input(void)
 			return;
 		}
 
-		// Why use `ino` here?
-		// ====================
-		// If you resize your window while the `you wanna delete this file?` window is active,
-		// the `file`_path we got by `paths[new_idx]` may not be accurate, it happens because of the way we calculate
-		// indexes in `get_tile_idx_from_tile_pos`. When you resize your window, the number of `tiles per row`
-		// may change, leading to potential problems.
-
-		// Therefore, when you press `D`, we save the original `ino` of the file you clicked on, and if window resized and
-		// `new_idx` does not match the original `delete_tile_idx`, we check if the old and new `ino` are match,
-		// and if they do, we update the `tile_idx`.
-
-		int new_idx = (int) get_tile_idx_from_tile_pos(selected_tile_pos);
-		size_t new_ino = paths[new_idx].ino;
-
-		if (delete_tile_idx == -1) {
-			delete_ino = new_ino;
-			if (delete_tile_idx == -1 || delete_tile_idx != new_idx) {
-				if (new_ino == delete_ino) {
-					delete_tile_idx = new_idx;
-				}
-			}
-		}
+		check_for_updated_tile_idx(&delete_tile_idx, &delete_ino);
 
 		char *file_path = paths[delete_tile_idx].str;
 
+		scratch_buffer_clear();
 		if (delete_sure) {
-			scratch_buffer_clear();
-			scratch_buffer_printf("delete %s recursively? [y/n]", file_path);
+			if (delete_failed) {
+				scratch_buffer_printf("failed to delete %s: %s\n", file_path, delete_fail);
+			} else {
+				scratch_buffer_printf("delete %s recursively? [y/n]", file_path);
+			}
 		} else {
-			scratch_buffer_clear();
 			scratch_buffer_printf("delete %s? [y/n]", file_path);
 		}
 
@@ -571,32 +625,33 @@ static void handle_keyboard_input(void)
 										text);
 
 		if (key == KEY_Y) {
-			if (delete_sure) {
+			if (delete_failed) {
 				stop_delete_mode();
+				return;
+			}
 
+			if (delete_sure) {
 				nftw(paths[delete_tile_idx].str,
 						 rm_file_callback,
 						 10,
 						 FTW_DEPTH | FTW_MOUNT|FTW_PHYS);
 
 				paths[delete_tile_idx].deleted = true;
+				stop_delete_mode();
 				return;
 			} else if (paths[delete_tile_idx].type == DT_DIR) {
 				delete_sure = true;
 				return;
 			}
 
-			scratch_buffer_clear();
-			scratch_buffer_append(curr_dir);
-			scratch_buffer_append_char('/');
-			scratch_buffer_append(paths[delete_tile_idx].str);
+			scratch_buffer_append_full_file_path(paths[delete_tile_idx].str);
 
 			errno = 0;
 			char *file_path = scratch_buffer_to_string();
 			if (remove(file_path) == -1) {
-				eprintf("failed to remove %s: %s\n",
-								file_path,
-								strerror(errno));
+				delete_failed = true;
+				delete_fail = strerror(errno);
+				eprintf("failed to delete %s: %s\n", file_path, delete_fail);
 				return;
 			}
 
@@ -617,7 +672,6 @@ static void handle_keyboard_input(void)
 
 		if (rename_sure) {
 			scratch_buffer_clear();
-
 			if (rename_failed) {
 				scratch_buffer_printf("failed to rename %s to %s, %s. ok?",
 															paths[rename_tile_idx].str,
@@ -640,18 +694,10 @@ static void handle_keyboard_input(void)
 					return;
 				}
 
-				scratch_buffer_clear();
-				scratch_buffer_append(curr_dir);
-				scratch_buffer_append_char('/');
-				scratch_buffer_append(paths[rename_tile_idx].str);
-
+				scratch_buffer_append_full_file_path(paths[rename_tile_idx].str);
 				char *old = scratch_buffer_copy();
 
-				scratch_buffer_clear();
-				scratch_buffer_append(curr_dir);
-				scratch_buffer_append_char('/');
-				scratch_buffer_append(rename_string);
-
+				scratch_buffer_append_full_file_path(rename_string);
 				char *new_ = scratch_buffer_copy();
 				const size_t len = scratch_buffer.len;
 
@@ -660,8 +706,7 @@ static void handle_keyboard_input(void)
 					rename_failed = true;
 					rename_fail = strerror(errno);
 
-					eprintf("failed to rename %s to %s: %s",
-									old, new_, rename_fail);
+					eprintf("failed to rename %s to %s: %s", old, new_, rename_fail);
 					return;
 				}
 
@@ -676,23 +721,15 @@ static void handle_keyboard_input(void)
 			return;
 		}
 
-		int new_idx = (int) get_tile_idx_from_tile_pos(selected_tile_pos);
-		size_t new_ino = paths[new_idx].ino;
+		check_for_updated_tile_idx(&rename_tile_idx, &rename_ino);
 
-		if (rename_tile_idx == -1) {
-			rename_ino = new_ino;
-			if (rename_tile_idx == -1 || rename_tile_idx != new_idx) {
-				if (new_ino == rename_ino) {
-					rename_tile_idx = new_idx;
-				}
-			}
-		}
-
-		draw_bot_window();
+		draw_bot_window(DEFAULT_BOT_WINDOW_BACKGROUND_COLOR,
+										RENAME_TEXT_HEIGHT,
+										RENAME_TEXT_SPACING);
 
 		const Vector2 tp = get_text_pos_to_draw_into_bot_window(
-			SEARCH_TEXT_SPACING,
-			SEARCH_TEXT_HEIGHT);
+			RENAME_TEXT_SPACING,
+			RENAME_TEXT_HEIGHT);
 
 		if (rename_string_size > 0) {
 			DrawTextEx(font,
@@ -703,11 +740,8 @@ static void handle_keyboard_input(void)
 								 RAYWHITE);
 		}
 
-		if (key == KEY_ENTER) {
-			if (rename_string_size < 1) return;
-			printf("%s\n", rename_string);
+		if (key == KEY_ENTER && rename_string_size >= 1) {
 			rename_sure = true;
-
 		} else if (key == KEY_SPACE || key_is_printable(key)) {
 			if (rename_string_size == MAX_PATH_SIZE) return;
 			if (!IsKeyDown(KEY_LEFT_SHIFT)) {
@@ -722,7 +756,9 @@ static void handle_keyboard_input(void)
 	}
 
 	if (search_mode) {
-		draw_bot_window();
+		draw_bot_window(DEFAULT_BOT_WINDOW_BACKGROUND_COLOR,
+										SEARCH_TEXT_HEIGHT,
+										SEARCH_TEXT_SPACING);
 
 		const Vector2 tp = get_text_pos_to_draw_into_bot_window(
 			SEARCH_TEXT_SPACING,
@@ -749,23 +785,23 @@ static void handle_keyboard_input(void)
 			if (last_matched_idx >= matched_idxs.size()) return;
 
 			const size_t idx = matched_idxs[last_matched_idx++];
-			const Vector2 new_selected_tile_pos = path_idx_to_tile_pos(idx);
+			const Vector2i new_selected_tile_pos = idx_to_tile_pos(idx);
 
 			selected_tile_pos.x = new_selected_tile_pos.x;
 			selected_tile_pos.y = new_selected_tile_pos.y;
 
-			update_selected_tile_if_its_not_visible();
+			update_offset_if_tile_is_not_visible(selected_tile_pos);
 			return;
 		} else if (key == KEY_P) {
 			if (last_matched_idx == 0) return;
 
 			const size_t idx = matched_idxs[last_matched_idx--];
-			const Vector2 new_selected_tile_pos = path_idx_to_tile_pos(idx);
+			const Vector2i new_selected_tile_pos = idx_to_tile_pos(idx);
 
 			selected_tile_pos.x = new_selected_tile_pos.x;
 			selected_tile_pos.y = new_selected_tile_pos.y;
 
-			update_selected_tile_if_its_not_visible();
+			update_offset_if_tile_is_not_visible(selected_tile_pos);
 			return;
 		}
 
@@ -803,10 +839,10 @@ draw_search:
 
 				if (strstr(scratch_buffer.str, search_string) != NULL) {
 					if (matched_idxs.empty()) {
-						const Vector2 new_selected_tile_pos = path_idx_to_tile_pos(i);
+						const Vector2i new_selected_tile_pos = idx_to_tile_pos(i);
 						selected_tile_pos.x = new_selected_tile_pos.x;
 						selected_tile_pos.y = new_selected_tile_pos.y;
-						update_selected_tile_if_its_not_visible();
+						update_offset_if_tile_is_not_visible(selected_tile_pos);
 					}
 					matched_idxs.emplace_back(i);
 				}
@@ -962,7 +998,7 @@ INLINE static Rectangle get_tile_rect(const Vector2 *tile_pos)
 {
 	return (Rectangle) {
 		.x = tile_pos->x + text_padding,
-		.width = tile_width - text_padding * 2,
+		.width = tile_width - text_padding*2,
 		.y = tile_pos->y + text_padding,
 		.height = tile_height - text_padding
 	};
@@ -973,7 +1009,7 @@ static void handle_mouse_input(void)
 	const int tpr = get_tiles_per_row();
 	if (tpr == 0) return;
 
-	scroll_offset_y -= GetMouseWheelMove() * scroll_speed;
+	scroll_offset_y -= GetMouseWheelMove()*scroll_speed;
 
 	if (scroll_offset_y < 0) scroll_offset_y = 0;
 	if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return;
@@ -1184,7 +1220,7 @@ static uint8_t *load_first_frame(const char *file_path, Mat *frame)
 		return NULL;
 	}
 
-	uint8_t *data = (uint8_t*) malloc(frame->rows * frame->cols * 3);
+	uint8_t *data = (uint8_t*) malloc(frame->rows*frame->cols*3);
 	Mat buf(frame->rows, frame->cols, CV_8UC3, data);
 
 	cvtColor(*frame, buf, COLOR_BGR2RGB);
@@ -1207,7 +1243,7 @@ static void resize_img(Image *img, int tw, int th)
 		nh = tw / original_aspect;
 	} else {
 		nh = th;
-		nw = th * original_aspect;
+		nw = th*original_aspect;
 	}
 
 	ImageResize(img, nw, nh);
@@ -1234,7 +1270,7 @@ static void handle_enter(char *file_path)
 	}
 }
 
-uint8_t *try_get_album_cover(const char *file_path, size_t *data_size)
+static uint8_t *try_get_album_cover(const char *file_path, size_t *data_size)
 {
 	MPEG::File file = MPEG::File(file_path);
 	ID3v2::Tag *id3v2_tag = file.ID3v2Tag();
@@ -1364,18 +1400,18 @@ static void render_files(void)
 															 text_padding		+
 															 (tile_width		-
 																texture.width -
-																2 * text_padding) / 2;
+																2*text_padding) / 2;
 
 			const float centered_y = tile_pos.y			 +
 															 text_padding		 +
 															 (tile_height		 -
 																texture.height -
-																2 * text_padding) / 2;
+																2*text_padding) / 2;
 
 			DrawTexture(texture, centered_x, centered_y, WHITE);
 
 			const Vector2 text_pos = get_text_pos(&tile_pos);
-			draw_text_truncated(paths[i].str, text_pos, tile_width - 2 * text_padding, WHITE);
+			draw_text_truncated(paths[i].str, text_pos, tile_width - 2*text_padding, WHITE);
 		}
 	}
 }
@@ -1390,10 +1426,7 @@ INLINE static Image scale_img(Image src_img)
 
 static void handle_dropped_files(void)
 {
-	if (!IsFileDropped()) return;
-
 	FilePathList files = LoadDroppedFiles();
-
 	for (size_t i = 0; i < files.count; i++) {
 		struct stat info = {0};
 		stat(files.paths[i], &info);
@@ -1552,38 +1585,9 @@ INLINE static uint8_t is_dir(const char *file_path)
 // fill img map with placeholder textures
 static void fill_img_map(void)
 {
-	Image scaled_img = placeholder_src;
-	scaled_img.data = copy_img_data(&placeholder_src);
-	resize_img_to_size_of_tile(&scaled_img);
-
-	img_value_t img = {
-		.src_img = placeholder_src,
-		.scaled_img = scaled_img,
-		.is_placeholder = true,
-		.loaded_texture = LoadTextureFromImage(scaled_img)
-	};
-
-	Image music_scaled_img = music_placeholder_src;
-	music_scaled_img.data = copy_img_data(&music_placeholder_src);
-	resize_img_to_size_of_tile(&music_scaled_img);
-
-	img_value_t music_img = {
-		.src_img = music_placeholder_src,
-		.scaled_img = music_scaled_img,
-		.is_placeholder = true,
-		.loaded_texture = LoadTextureFromImage(music_scaled_img)
-	};
-
-	Image dir_scaled_img = dir_placeholder_src;
-	dir_scaled_img.data = copy_img_data(&dir_placeholder_src);
-	resize_img_to_size_of_tile(&dir_scaled_img);
-
-	img_value_t dir_img = {
-		.src_img = dir_placeholder_src,
-		.scaled_img = dir_scaled_img,
-		.is_placeholder = true,
-		.loaded_texture = LoadTextureFromImage(dir_scaled_img)
-	};
+	LOAD_PLACEHOLDER();
+	LOAD_PLACEHOLDER(music_);
+	LOAD_PLACEHOLDER(dir_);
 
 	for (const auto &path: paths) {
 		scratch_buffer_clear();
@@ -1602,7 +1606,7 @@ static void fill_img_map(void)
 		if (is_music(ext)) {
 			hmput(img_map, path.ino, music_img);
 		}	else if (path.type == DT_DIR) {
-				hmput(img_map, path.ino, dir_img);
+			hmput(img_map, path.ino, dir_img);
 		} else {
 			hmput(img_map, path.ino, img);
 		}
@@ -1626,21 +1630,21 @@ int main(const int argc, char *argv[])
 
 	read_dir();
 
-	placeholder_src = LoadImage(PLACEHOLDER_PATH);
-	placeholder_texture =	LoadTextureFromImage(placeholder_src);
-
+	placeholder_src				= LoadImage(PLACEHOLDER_PATH);
 	music_placeholder_src = LoadImage(MUSIC_PLACEHOLDER_PATH);
-	music_placeholder_texture =	LoadTextureFromImage(music_placeholder_src);
+	dir_placeholder_src		= LoadImage(DIR_PLACEHOLDER_PATH);
 
-	dir_placeholder_src = LoadImage(DIR_PLACEHOLDER_PATH);
-	dir_placeholder_texture =	LoadTextureFromImage(dir_placeholder_src);
+	placeholder_texture				=	LoadTextureFromImage(placeholder_src);
+	music_placeholder_texture =	LoadTextureFromImage(music_placeholder_src);
+	dir_placeholder_texture		=	LoadTextureFromImage(dir_placeholder_src);
 
 	fill_img_map();
 
 	std::thread preview_loader = std::thread(load_previews);
 
 	while (!WindowShouldClose()) {
-		handle_dropped_files();
+		if (IsWindowResized()) update_tile_pos();
+		if (IsFileDropped()) handle_dropped_files();
 		BeginDrawing();
 			ClearBackground(BACKGROUND_COLOR);
 			render_files();
