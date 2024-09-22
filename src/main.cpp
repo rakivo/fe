@@ -12,6 +12,7 @@
 #include <thread>
 #include <fstream>
 #include <optional>
+#include <algorithm>
 
 #define SCRATCH_BUFFER_IMPLEMENTATION
 #include "scratch_buffer.h"
@@ -56,7 +57,7 @@ using namespace TagLib;
 #define DELETE_ASK_WINDOW_PADDING_FACTOR 0.00003667
 
 #define DELETE_ASK_WINDOW_TEXT_PADDING (\
-	DELETE_ASK_WINDOW_PADDING_FACTOR *\
+	DELETE_ASK_WINDOW_PADDING_FACTOR*\
 	((GetScreenHeight() / 1.2)*GetScreenWidth()) \
 )
 
@@ -169,6 +170,12 @@ static float scale = DEFAULT_SCALE;
 		.loaded_texture = LoadTextureFromImage(__VA_ARGS__##scaled_img) \
 	};
 
+#define UNLOAD_PLACEHOLDER(...) do { \
+	UnloadImage(__VA_ARGS__##placeholder_src); \
+	UnloadImage(__VA_ARGS__##placeholder_scaled); \
+	UnloadTexture(__VA_ARGS__##placeholder_texture); \
+} while (0)
+
 #define DEFINE_PLACEHOLDER(...) \
 	static Image __VA_ARGS__##placeholder_src = {0}; \
 	static Image __VA_ARGS__##placeholder_scaled = {0}; \
@@ -229,9 +236,25 @@ static img_map_t *img_map = NULL;
 struct path_t {
 	char *str;
 	size_t ino;
+	timespec mtim;
 	uint8_t type;
 	bool abs, deleted;
 };
+
+INLINE static path_t new_path(char *str,
+															struct stat *info,
+															uint8_t type,
+															bool abs)
+{
+	return (path_t) {
+		.str = str,
+		.ino = (size_t) info->st_ino,
+		.type = type,
+		.mtim = info->st_mtim,
+		.abs = abs,
+		.deleted = false,
+	};
+}
 
 static std::vector<path_t> paths = {};
 
@@ -336,6 +359,8 @@ static void set_new_scale(float new_scale)
 	update_tile_pos();
 }
 
+INLINE static char *scratch_buffer_append_full_file_path(char *file_path);
+
 static void read_dir(void)
 {
 	DIR *dir = opendir(curr_dir);
@@ -349,15 +374,21 @@ static void read_dir(void)
 	while (e != NULL) {
 		if (!streq(e->d_name, ".")) {
 			char *file_path = str_copy(e->d_name, strlen(e->d_name));
-			size_t ino = (size_t) e->d_ino;
-			uint8_t type = (uint8_t) e->d_type;
-			paths.emplace_back((path_t) {
-				.str = file_path,
-				.ino = ino,
-				.type = type,
-				.abs = false,
-				.deleted = false
-			});
+			scratch_buffer_append_full_file_path(file_path);
+
+			struct stat info = {0};
+			char *full_file_path = scratch_buffer_to_string();
+
+			if (stat(full_file_path, &info) == -1) {
+				eprintf("failed to stat %s\n", full_file_path);
+			}
+
+			const path_t path = new_path(file_path,
+																	 &info,
+																	 (uint8_t) e->d_type,
+																	 false);
+
+			paths.emplace_back(path);
 		}
 		e = readdir(dir);
 	}
@@ -593,6 +624,14 @@ INLINE static void check_for_updated_tile_idx(int *tile_idx, size_t *ino)
 		*ino = new_ino;
 		*tile_idx = new_idx;
 	}
+}
+
+INLINE static bool mtim_cmp(path_t a, path_t b)
+{
+	if (a.mtim.tv_sec == b.mtim.tv_sec) {
+		return a.mtim.tv_nsec > b.mtim.tv_nsec;
+	}
+	return a.mtim.tv_sec > b.mtim.tv_sec;
 }
 
 static void handle_keyboard_input(void)
@@ -962,6 +1001,11 @@ draw_search:
 	} break;
 
 	case KEY_S: case KEY_DOWN:
+	if (IsKeyDown(KEY_LEFT_SHIFT)) {
+		std::sort(paths.begin(), paths.end(), mtim_cmp);
+		return;
+	}
+
 	if (selected_tile_pos.y < total_rows - 1) {
 		if (!(selected_tile_pos.y == total_rows - 2
 		&& selected_tile_pos.x >= tiles_in_last_row))
@@ -1549,13 +1593,10 @@ static void handle_dropped_files(void)
 		Nob_Proc proc = nob_cmd_run_async(cmd, true);
 		procs.emplace_back(proc);
 
-		path_t path = {
-			.ino = (size_t) info.st_ino,
-			.str = top_level_file_path_copy,
-			.type = type,
-			.abs = true,
-			.deleted = false,
-		};
+		path_t path = new_path(top_level_file_path_copy,
+													 &info,
+													 type,
+													 true);
 
 		paths.emplace_back(path);
 
@@ -1580,7 +1621,7 @@ static void handle_dropped_files(void)
 	UnloadDroppedFiles(files);
 }
 
-static void load_preview(size_t i, path_t path_ino, size_t size)
+static void load_preview(size_t i, path_t path, size_t size)
 {
 	bool prev_scale_flag = new_scale_flag;
 	if (i == size - 1) {
@@ -1588,10 +1629,10 @@ static void load_preview(size_t i, path_t path_ino, size_t size)
 		idle_flag = true;
 	}
 
-	int idx = hmgeti(img_map, path_ino.ino);
+	int idx = hmgeti(img_map, path.ino);
 
 	if (prev_scale_flag) {
-		img_map_t *p = hmgetp(img_map, path_ino.ino);
+		img_map_t *p = hmgetp(img_map, path.ino);
 
 		if (img_map[idx].value.is_placeholder) {
 			UnloadImage(placeholder_scaled);
@@ -1617,12 +1658,12 @@ static void load_preview(size_t i, path_t path_ino, size_t size)
 	} else if (!img_map[idx].value.is_placeholder) return;
 
 	scratch_buffer_clear();
-	if (!path_ino.abs) {
+	if (!path.abs) {
 		scratch_buffer_append(curr_dir);
 		scratch_buffer_append_char('/');
 	}
 
-	scratch_buffer_append(path_ino.str);
+	scratch_buffer_append(path.str);
 
 	char *file_path = scratch_buffer_to_string();
 
@@ -1641,7 +1682,7 @@ static void load_preview(size_t i, path_t path_ino, size_t size)
 		.loaded_texture = std::nullopt,
 	};
 
-	hmput(img_map, path_ino.ino, value);
+	hmput(img_map, path.ino, value);
 	return;
 }
 
@@ -1751,17 +1792,13 @@ int main(const int argc, char *argv[])
 		nob_proc_kill(proc, true);
 	}
 
-	stop_flag = true;
-	preview_loader.join();
-
 	for (long i = 0; i < hmlen(img_map); ++i) {
 		if (!img_map[i].value.is_placeholder) {
 			UnloadImage(img_map[i].value.scaled_img);
 			UnloadImage(img_map[i].value.src_img);
-		}
-
-		if (img_map[i].value.loaded_texture) {
-			UnloadTexture(*img_map[i].value.loaded_texture);
+			if (img_map[i].value.loaded_texture) {
+				UnloadTexture(*img_map[i].value.loaded_texture);
+			}
 		}
 	}
 
@@ -1769,13 +1806,18 @@ int main(const int argc, char *argv[])
 		UnloadTexture(texture);
 	}
 
-	UnloadImage(placeholder_src);
-	UnloadTexture(placeholder_texture);
+	UNLOAD_PLACEHOLDER();
+	UNLOAD_PLACEHOLDER(music_);
+	UNLOAD_PLACEHOLDER(dir_);
 
 	memory_release();
 	hmfree(img_map);
 	UnloadFont(font);
 	CloseWindow();
+
+	stop_flag = true;
+	preview_loader.join();
+
 	return 0;
 }
 
