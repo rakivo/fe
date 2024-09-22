@@ -53,6 +53,7 @@ using namespace TagLib;
 #define SEARCH_WINDOW_BACKGROUND_COLOR ((Color) {65, 65, 65, 215})
 #define DELETE_SURE_WINDOW_BACKGROUND_COLOR ((Color) {50, 50, 50, 225})
 #define RENAME_SURE_WINDOW_BACKGROUND_COLOR DELETE_SURE_WINDOW_BACKGROUND_COLOR
+#define SORT_WINDOW_BACKGROUND_COLOR DELETE_SURE_WINDOW_BACKGROUND_COLOR
 
 #define DELETE_ASK_WINDOW_PADDING_FACTOR 0.00003667
 
@@ -116,6 +117,8 @@ static char rename_string[MAX_PATH_SIZE] = {0};
 static size_t rename_string_size = 0;
 static size_t rename_ino = -1;
 static int rename_tile_idx = -1;
+
+static bool sort_mode = false;
 
 static bool search_mode = false;
 static bool typing_search = false;
@@ -217,7 +220,7 @@ static size_t last_matched_idx = 1;
 static std::vector<size_t> matched_idxs = {};
 
 #define DEFINE_SIZE(what) \
-	const size_t what##_SIZE = sizeof(what) / sizeof(*what)
+const size_t what##_SIZE = sizeof(what) / sizeof(*what)
 
 #define DEFINE_IS(what, array) \
 	INLINE static bool _is_##what(const char *ext) \
@@ -256,6 +259,7 @@ struct path_t {
 	char *str;
 	size_t ino;
 	timespec mtim;
+	long size;
 	uint8_t type;
 	bool abs, deleted;
 };
@@ -268,8 +272,9 @@ INLINE static path_t new_path(char *str,
 	return (path_t) {
 		.str = str,
 		.ino = (size_t) info->st_ino,
-		.type = type,
 		.mtim = info->st_mtim,
+		.size = info->st_size,
+		.type = type,
 		.abs = abs,
 		.deleted = false,
 	};
@@ -465,15 +470,15 @@ INLINE static Vector2i idx_to_tile_pos(size_t idx)
 {
 	const size_t tpr = get_tiles_per_row();
 	return (Vector2i) {
-		.x = idx % tpr,
-		.y = idx / tpr
+		(int) (idx % tpr),
+		(int) (idx / tpr)
 	};
 }
 
 INLINE static Vector2 get_tile_pos(size_t tile_pos_x, size_t tile_pos_y)
 {
 	return (Vector2) {
-		tile_pos_x*(tile_width + tile_spacing) + tile_spacing,
+		(float) tile_pos_x*(tile_width + tile_spacing) + tile_spacing,
 		tile_pos_y*(tile_height + tile_spacing) + tile_spacing - scroll_offset_y
 	};
 }
@@ -523,6 +528,11 @@ INLINE static void stop_rename_mode(void)
 	rename_string_size = 0;
 	rename_ino = -1;
 	rename_tile_idx = -1;
+}
+
+INLINE static void stop_sort_mode(void)
+{
+  sort_mode = false;
 }
 
 INLINE static void stop_search_mode(void)
@@ -588,10 +598,10 @@ static void draw_ask_window(Color bg, Color tc, int pad, char *text)
 	} else {
 		draw_text_boxed(font, text,
 										(Rectangle) {
-											rx + pad,
-											ry + pad,
-											rw - pad,
-											rh - pad
+											(float) (rx + pad),
+											(float) (ry + pad),
+											(float) (rw - pad),
+											(float) (rh - pad)
 										}, true, tc);
 	}
 }
@@ -622,7 +632,7 @@ INLINE static void draw_bot_window(Color bg, int th, int ts)
 
 INLINE static Vector2 get_text_pos_to_draw_into_bot_window(int ts, int th)
 {
-	return (Vector2) {ts, GetScreenHeight() - th};
+	return (Vector2) {(float) ts, (float) (GetScreenHeight() - th)};
 }
 
 static void handle_enter(char *file_path);
@@ -652,6 +662,11 @@ INLINE static bool mtim_cmp(path_t a, path_t b)
 		return a.mtim.tv_nsec > b.mtim.tv_nsec;
 	}
 	return a.mtim.tv_sec > b.mtim.tv_sec;
+}
+
+INLINE static bool size_cmp(path_t a, path_t b)
+{
+  return a.size > b.size;
 }
 
 static void handle_keyboard_input(void)
@@ -950,6 +965,28 @@ draw_search:
 		}
 	}
 
+	if (sort_mode) {
+	  if (key == KEY_ESCAPE) {
+	    stop_sort_mode();
+	  	return;
+	  }
+
+		draw_ask_window(SORT_WINDOW_BACKGROUND_COLOR,
+	                  RAYWHITE,
+									  DELETE_ASK_WINDOW_TEXT_PADDING,
+							      "s: by size of a file, m: by last modification time");
+
+		if (key == KEY_S) {
+      std::sort(paths.begin(), paths.end(), size_cmp);
+      stop_sort_mode();
+    } else if (key == KEY_M) {
+      std::sort(paths.begin(), paths.end(), mtim_cmp);
+      stop_sort_mode();
+    }
+
+    return;
+  }
+
 	if (IsKeyDown(KEY_LEFT_SHIFT)) {
 		scroll_speed = BOOSTED_SCROLL_SPEED;
 	} else {
@@ -1021,8 +1058,8 @@ draw_search:
 	} break;
 
 	case KEY_S: case KEY_DOWN:
-	if (IsKeyDown(KEY_LEFT_SHIFT)) {
-		std::sort(paths.begin(), paths.end(), mtim_cmp);
+  if (IsKeyDown(KEY_LEFT_SHIFT)) {
+		sort_mode = true;
 		return;
 	}
 
@@ -1067,9 +1104,9 @@ INLINE static Rectangle get_tile_rect(const Vector2 *tile_pos)
 {
 	return (Rectangle) {
 		.x = tile_pos->x + text_padding,
-		.width = tile_width - text_padding*2,
 		.y = tile_pos->y + text_padding,
-		.height = tile_height - text_padding
+		.width = (float) tile_width - text_padding*2,
+		.height = (float) tile_height - text_padding
 	};
 }
 
@@ -1278,7 +1315,7 @@ INLINE static void draw_text_boxed(Font font,
 
 static uint8_t *load_first_frame(const char *file_path, Mat *frame)
 {
-	VideoCapture cap(file_path);
+	VideoCapture cap = VideoCapture(file_path);
 	if (!cap.isOpened()) {
 		eprintf("could not open video file.\n");
 		return NULL;
@@ -1290,7 +1327,7 @@ static uint8_t *load_first_frame(const char *file_path, Mat *frame)
 	}
 
 	uint8_t *data = (uint8_t*) malloc(frame->rows*frame->cols*3);
-	Mat buf(frame->rows, frame->cols, CV_8UC3, data);
+	Mat buf = Mat(frame->rows, frame->cols, CV_8UC3, data);
 
 	cvtColor(*frame, buf, COLOR_BGR2RGB);
 	buf.release();
@@ -1534,7 +1571,12 @@ static void render_files(void)
 			tile_color = MATCHED_TILE_COLOR;
 		}
 
-		DrawRectangleV(tile_pos, (Vector2){tile_width, tile_height}, tile_color);
+		DrawRectangleV(tile_pos,
+		              (Vector2) {
+		                (float) tile_width,
+								    (float) tile_height
+		              },
+								  tile_color);
 
 		if (selected_tile_pos.x == tile_pos_x
 		&&	selected_tile_pos.y == tile_pos_y)
