@@ -159,16 +159,30 @@ static float scale = DEFAULT_SCALE;
 	__VA_ARGS__##placeholder_resized = false; \
 } while (0)
 
-#define LOAD_PLACEHOLDER(...) \
-	Image __VA_ARGS__##scaled_img = __VA_ARGS__##placeholder_src; \
+#define DECLARE_SCALED_IMG(...) \
+	Image __VA_ARGS__##scaled_img = {0};
+
+#define INIT_SCALED_IMG(...) \
+	__VA_ARGS__##scaled_img = __VA_ARGS__##placeholder_src; \
 	__VA_ARGS__##scaled_img.data = copy_img_data(&__VA_ARGS__##placeholder_src); \
 	resize_img_to_size_of_tile(&__VA_ARGS__##scaled_img); \
+	__VA_ARGS__##placeholder_scaled = __VA_ARGS__##scaled_img
+
+#define CPY_SCALED_IMG(...) do { \
+	__VA_ARGS__##scaled_img.data = __VA_ARGS__##placeholder_scaled.data; \
+	__VA_ARGS__##scaled_img.width = __VA_ARGS__##placeholder_scaled.width; \
+	__VA_ARGS__##scaled_img.height = __VA_ARGS__##placeholder_scaled.height; \
+	__VA_ARGS__##scaled_img.mipmaps = __VA_ARGS__##placeholder_scaled.mipmaps; \
+	__VA_ARGS__##scaled_img.format = __VA_ARGS__##placeholder_scaled.format; \
+} while (0)
+
+#define INIT_IMG_VALUE(...) \
 	img_value_t __VA_ARGS__##img = { \
 		.src_img = __VA_ARGS__##placeholder_src, \
 		.scaled_img = __VA_ARGS__##scaled_img, \
 		.is_placeholder = true, \
 		.loaded_texture = LoadTextureFromImage(__VA_ARGS__##scaled_img) \
-	};
+	}
 
 #define UNLOAD_PLACEHOLDER(...) do { \
 	UnloadImage(__VA_ARGS__##placeholder_src); \
@@ -182,11 +196,18 @@ static float scale = DEFAULT_SCALE;
 	static Texture2D __VA_ARGS__##placeholder_texture = {0}; \
 	static bool __VA_ARGS__##placeholder_resized = false
 
-DEFINE_PLACEHOLDER();
-DEFINE_PLACEHOLDER(dir_);
-DEFINE_PLACEHOLDER(music_);
+#define XPLACEHOLDERS \
+	X(); \
+	X(dir_); \
+	X(music_);
+
+#define X DEFINE_PLACEHOLDER
+XPLACEHOLDERS
+#undef X
 
 typedef struct path_t path_t;
+typedef struct img_map_t img_map_t;
+typedef struct img_value_t img_value_t;
 
 static std::vector<Nob_Proc> procs = {};
 static std::vector<Texture2D> to_unload = {};
@@ -219,19 +240,17 @@ static const char *const IMAGE_FILE_EXTENSIONS[] = {"png", "jpg", "bmp", "tga", 
 DEFINE_SIZE(IMAGE_FILE_EXTENSIONS);
 DEFINE_IS(image, IMAGE_FILE_EXTENSIONS);
 
-typedef struct {
+struct img_value_t {
 	Image src_img;
 	Image scaled_img;
 	bool is_placeholder;
 	std::optional<Texture2D> loaded_texture;
-} img_value_t;
+};
 
-typedef struct {
+struct img_map_t {
 	size_t key;
 	img_value_t value;
-} img_map_t;
-
-static img_map_t *img_map = NULL;
+};
 
 struct path_t {
 	char *str;
@@ -256,6 +275,7 @@ INLINE static path_t new_path(char *str,
 	};
 }
 
+static img_map_t *img_map = NULL;
 static std::vector<path_t> paths = {};
 
 // in millis
@@ -480,7 +500,7 @@ INLINE static char *get_extension(char *src)
 	return NULL;
 }
 
-static void fill_img_map(void);
+static void fill_img_map(bool init);
 
 INLINE static void enter_dir(char *dir, size_t tile_idx)
 {
@@ -488,7 +508,7 @@ INLINE static void enter_dir(char *dir, size_t tile_idx)
 	idle_flag = true;
 	paths.clear();
 	read_dir();
-	fill_img_map();
+	fill_img_map(false);
 	idle_flag = false;
 	preserve_tile_pos(tile_idx);
 }
@@ -1300,7 +1320,7 @@ static void resize_img(Image *img, int tw, int th)
 
 INLINE static void resize_img_to_size_of_tile(Image *img)
 {
-	resize_img(img, tile_width	 - text_padding, tile_height - text_padding);
+	resize_img(img, tile_width - text_padding, tile_height - text_padding);
 }
 
 INLINE static bool is_png_file(const char *file_path)
@@ -1377,9 +1397,7 @@ static uint8_t *try_get_album_cover(const char *file_path, size_t *data_size)
 	if (!picture_frame) return NULL;
 
 	const ByteVector &image_data = picture_frame->picture();
-
 	const size_t size = image_data.size();
-
 	*data_size = size;
 
 	uint8_t *data = (uint8_t*) malloc(size);
@@ -1716,11 +1734,25 @@ INLINE static uint8_t is_dir(const char *file_path)
 }
 
 // fill img map with placeholder textures
-static void fill_img_map(void)
+static void fill_img_map(bool init)
 {
-	LOAD_PLACEHOLDER();
-	LOAD_PLACEHOLDER(music_);
-	LOAD_PLACEHOLDER(dir_);
+	#define X DECLARE_SCALED_IMG
+	XPLACEHOLDERS
+	#undef X
+
+	if (init) {
+		#define X INIT_SCALED_IMG
+		XPLACEHOLDERS
+		#undef X
+	} else {
+		#define X CPY_SCALED_IMG
+		XPLACEHOLDERS
+		#undef X
+	}
+
+	#define X INIT_IMG_VALUE
+	XPLACEHOLDERS
+	#undef X
 
 	for (const auto &path: paths) {
 		scratch_buffer_clear();
@@ -1773,7 +1805,7 @@ int main(const int argc, char *argv[])
 	music_placeholder_texture =	LoadTextureFromImage(music_placeholder_src);
 	dir_placeholder_texture		=	LoadTextureFromImage(dir_placeholder_src);
 
-	fill_img_map();
+	fill_img_map(true);
 
 	std::thread preview_loader = std::thread(load_previews);
 
@@ -1806,9 +1838,9 @@ int main(const int argc, char *argv[])
 		UnloadTexture(texture);
 	}
 
-	UNLOAD_PLACEHOLDER();
-	UNLOAD_PLACEHOLDER(music_);
-	UNLOAD_PLACEHOLDER(dir_);
+	#define X UNLOAD_PLACEHOLDER
+	XPLACEHOLDERS
+	#undef X
 
 	memory_release();
 	hmfree(img_map);
